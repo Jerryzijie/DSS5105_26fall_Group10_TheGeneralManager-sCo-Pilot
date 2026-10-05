@@ -200,7 +200,7 @@ Use `factory_admin` only for database setup and trusted administration operation
 Run the scripts from the `postgresql_database` directory in this order:
 
 1. `sql/01_roles_and_database.sql` — initial setup only.
-2. `sql/02_schema_tables_permissions.sql` — initial construction only.
+2. `python -m alembic -c alembic.ini upgrade head` — apply all missing canonical schema migrations.
 3. `sql/03_import.sql` — reset and import the tracked current-table baseline and initial snapshot seed.
 4. `sql/04_validate.sql` — validate counts, totals, uniqueness and ownership.
 5. `sql/05_admin_permission_test.sql` — verify administrator permissions with a disposable probe table.
@@ -214,5 +214,5 @@ The latest reviewed local outputs are stored under `evidence/`. Run `sql/04_vali
 - Do not expose passwords in screenshots, terminal transcripts or chat messages.
 - Do not restore or initialise this prototype over an existing database containing important data.
 - Expected permission-denied messages in the read-only test are evidence of correct behaviour.
-- Apply structural changes through reviewed SQL scripts rather than undocumented manual edits.
+- Apply structural changes through reviewed Alembic migrations rather than legacy SQL or undocumented manual edits.
 - Create a backup before destructive administrative maintenance.

@@ -30,7 +30,10 @@ class FactoryDB:
                 """ , (PG_SCHEMA,)
             ).fetchall()
         if len(tables) < 4:
-            raise RuntimeError("PostgreSQL baseline is not installed. Run alembic upgrade head first.")
+            raise RuntimeError(
+                "PostgreSQL baseline is not installed. From the repository root, run "
+                "python -m alembic -c postgresql_database/alembic.ini upgrade head first."
+            )
         return "reused"
 
     def _fetch(self, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:

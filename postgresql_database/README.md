@@ -2,9 +2,16 @@
 
 ## Overview
 
-This directory contains the reproducible local PostgreSQL database for the Factory Copilot project. The SQL files create project roles, schemas, tables, constraints and permissions; import the three current business datasets and the initial order-state history; and test data integrity and access control.
+This directory owns the reproducible PostgreSQL database lifecycle for the
+Factory Copilot project. `sql/01_roles_and_database.sql` creates the project
+roles and database, Alembic migrations are the canonical source for schemas,
+tables, constraints, indexes, and grants, and the remaining SQL files import
+seed data and validate data integrity and permissions.
 
-The database is currently local rather than cloud-hosted. The experimental `SQL_related_app` backend has been connected to it and tested, but the main LangGraph application has not yet been formally switched to this PostgreSQL source.
+The database is currently local rather than cloud-hosted. The main FastAPI and
+LangGraph application uses PostgreSQL for operational, administrative,
+authentication, and Copilot data. Database setup remains explicit and is not
+run automatically when the application starts.
 
 ## Database design
 
@@ -45,22 +52,20 @@ Only `factory_admin` can access this schema. The two read-only login roles canno
 
 ```text
 postgresql_database/
+|-- alembic.ini
+|-- migrations/
+|   |-- env.py
+|   `-- versions/
+|       |-- 001_initial_auth.py
+|       `-- 002_auth_deactivation.py
 |-- data/
-|   |-- altogether_summary.csv
-|   |-- orders.csv
-|   |-- production_log.csv
-|   `-- workshops.csv
 |-- docs/
-|   |-- database_guide.md
-|   `-- field_mapping.md
 |-- evidence/
-|   |-- 04_validate.txt
-|   |-- 05_admin_permission_test.txt
-|   |-- 06_readonly_permission_test.txt
-|   `-- README.md
 |-- sql/
+|   |-- legacy/
+|   |   |-- README.md
+|   |   `-- schema_tables_permissions_pre_alembic.sql
 |   |-- 01_roles_and_database.sql
-|   |-- 02_schema_tables_permissions.sql
 |   |-- 03_import.sql
 |   |-- 04_validate.sql
 |   |-- 05_admin_permission_test.sql
@@ -114,7 +119,8 @@ localhost:5432 - accepting connections
 
 If `Start-Service` reports a permission error, run PowerShell as Administrator. PostgreSQL can also be started visually by pressing `Win + R`, entering `services.msc`, locating the PostgreSQL service, and selecting **Start**.
 
-Starting the PostgreSQL service is a routine operation and may be required after restarting the computer. Scripts `01` and `02` are for first-time database construction. Script `03` is used for the initial data import or an intentional baseline reset.
+Starting the PostgreSQL service is a routine operation and may be required after restarting the computer. Script `01` creates the project roles and database. Alembic creates or upgrades
+the database structure. Script `03` imports the reproducible baseline data.
 
 Do not store PostgreSQL passwords in this repository.
 
@@ -140,19 +146,19 @@ The script creates `factory_reader`, `factory_admin`, `factory_user`, `factory_a
 
 This is an initial-setup script. Do not rerun it after the roles and database exist.
 
-### 2. Create schemas, tables and permissions
+### 2. Apply canonical database migrations
 
-Run once as the project administrator:
+With the project virtual environment activated, run:
 
 ```powershell
-psql -X -h localhost -p 5432 -U factory_admin -d factory_copilot_db -W -f "sql/02_schema_tables_permissions.sql"
+python -m alembic -c alembic.ini upgrade head
 ```
+Alembic applies each missing revision in order. Revision `001_initial_auth`
+creates the Phase 1 schemas, tables, constraints, indexes, and grants. Revision
+`002_auth_deactivation` adds the account-deactivation fields and constraints.
+The files under `sql/legacy/` are historical references and must not be run
+during bootstrap.
 
-The script creates the four `app` tables, three `admin_meta` tables, database constraints, identity sequences, current permissions and default permissions for future `app` tables.
-
-Expected output includes `BEGIN`, two `CREATE SCHEMA` messages, seven `CREATE TABLE` messages, permission statements, and `COMMIT`.
-
-This is also an initial-construction script. Do not rerun it against an already constructed database.
 
 ### 3. Reset and import the reproducible baseline
 
@@ -266,7 +272,8 @@ Immediately after the baseline import, the final counts should show 120 `orders`
 ## Safe reruns
 
 - `01_roles_and_database.sql`: initial setup only;
-- `02_schema_tables_permissions.sql`: initial construction only;
+- `python -m alembic -c alembic.ini upgrade head`: safe to rerun; Alembic applies only missing revisions;
+- files under `sql/legacy/`: historical reference only; do not run during bootstrap;
 - `03_import.sql`: technically rerunnable, but destructive to post-baseline snapshot history; it resets all four `app` tables to the tracked baseline files;
 - `04_validate.sql`: safe to rerun;
 - `05_admin_permission_test.sql`: safe to rerun because its changes are rolled back;
@@ -277,6 +284,12 @@ Do not delete a database, schema, table or role merely to resolve an `already ex
 ## Connect the administration app
 
 After completing Steps 1–3, configure and run the local FastAPI/React administration app using [`../SQL_related_app/README.md`](../SQL_related_app/README.md).
+
+`SQL_related_app` remains a standalone data-administration middleware. It
+handles file preview, validation, transactional imports, data-source metadata,
+and controlled updates to the shared PostgreSQL database. It is not replaced
+by the Manager Copilot application. Both applications are database clients;
+the canonical schema remains owned by the Alembic migrations in this directory.
 
 The active backend uses:
 

@@ -3,9 +3,8 @@
 Revision ID: 001_initial_auth
 Revises: None
 
-Matches postgresql_database/sql/02_schema_tables_permissions.sql for the
-app + admin_meta tables (including the ORDERED lifecycle state), and adds
-the auth + copilot schemas for Phase 1.
+Defines the canonical Phase 1 schemas, tables, constraints, indexes, and grants
+for the application, administration, authentication, and Copilot data.
 """
 from alembic import op
 

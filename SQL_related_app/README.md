@@ -48,7 +48,8 @@ The `/api/admin` prefix is a route name, not application authentication. Until t
 ## Prerequisites
 
 - PostgreSQL running locally on port `5432` unless configured otherwise;
-- the database created using `../postgresql_database/sql/01_roles_and_database.sql` through `03_import.sql`;
+- the database created with `../postgresql_database/sql/01_roles_and_database.sql`,
+  upgraded with Alembic, and seeded with `../postgresql_database/sql/03_import.sql`;
 - Python 3.11 and `uv` for the backend environment;
 - Node.js and npm for the frontend.
 
