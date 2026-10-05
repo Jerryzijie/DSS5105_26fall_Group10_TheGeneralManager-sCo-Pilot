@@ -10,7 +10,6 @@ from typing import Any
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
 
 from backend.config import PROJECT_ROOT
@@ -24,7 +23,7 @@ load_dotenv(PROJECT_ROOT / ".env", override=True)
 logger = logging.getLogger(__name__)
 
 _AGENT = None
-_CHECKPOINTER = MemorySaver()
+_CHECKPOINTER = None
 _TEMPLATE_QUERY: ContextVar[str] = ContextVar("template_query", default="")
 
 # ---------------------------------------------------------------------------
@@ -112,10 +111,47 @@ def _react_prompt(state: dict[str, Any]):
     return [SystemMessage(content=system), *messages]
 
 
+def set_checkpointer(checkpointer: Any | None) -> None:
+    """Replace the Agent checkpointer and invalidate the cached graph."""
+
+    global _AGENT, _CHECKPOINTER
+    _AGENT = None
+    _CHECKPOINTER = checkpointer
+
+
+def _append_direct_exchange(
+    message: str,
+    answer: str,
+    thread_id: str | None,
+) -> None:
+    """Persist a non-Agent Human/AI exchange in LangGraph memory.
+
+    Direct callers that do not provide a server-scoped thread id retain the
+    existing no-LLM test path. Authenticated API calls always provide one.
+    """
+
+    if thread_id is None:
+        return
+
+    get_agent().update_state(
+        {"configurable": {"thread_id": thread_id}},
+        {
+            "messages": [
+                HumanMessage(content=message),
+                AIMessage(content=answer),
+            ],
+        },
+    )
+
+
 def get_agent():
     """Build the agent once. Provider selected by LLM_PROVIDER / keys."""
     global _AGENT
     if _AGENT is None:
+        if _CHECKPOINTER is None:
+            raise RuntimeError(
+                "LangGraph checkpointer has not been initialized"
+            )
         if not llm_is_configured():
             raise RuntimeError(
                 "LLM key is not set. For Gemini set GOOGLE_API_KEY; "
@@ -138,7 +174,7 @@ def get_agent():
     return _AGENT
 
 
-def run_agent(message: str, conversation_id: str) -> dict[str, Any]:
+def run_agent(message: str, conversation_id: str, *, thread_id: str | None = None) -> dict[str, Any]:
     """Entry point used by /api/chat.
 
     Unsupported / not-implemented questions are answered here without an LLM
@@ -160,6 +196,7 @@ def run_agent(message: str, conversation_id: str) -> dict[str, Any]:
             "limitation": decision.reason,
             "routing_intent": decision.intent,
         }
+        _append_direct_exchange(message, parsed["answer"], thread_id)
         _audit_turn(message, conversation_id, parsed, short_circuit=True)
         return parsed
 
@@ -174,15 +211,17 @@ def run_agent(message: str, conversation_id: str) -> dict[str, Any]:
             "limitation": gate.limitation,
             "routing_intent": decision.intent,
         }
+        _append_direct_exchange(message, parsed["answer"], thread_id)
         _audit_turn(message, conversation_id, parsed, short_circuit=False)
         return parsed
 
     token = _TEMPLATE_QUERY.set(message)
     try:
         agent = get_agent()
+        memory_thread_id = thread_id or conversation_id
         result = agent.invoke(
             {"messages": [{"role": "user", "content": message}]},
-            config={"configurable": {"thread_id": conversation_id}},
+            config={"configurable": {"thread_id": memory_thread_id}},
         )
     finally:
         _TEMPLATE_QUERY.reset(token)
@@ -210,7 +249,7 @@ def _latest_turn(messages: list[Any]) -> list[Any]:
 
 def parse_agent_result(result: dict[str, Any], conversation_id: str) -> dict[str, Any]:
     messages: list[BaseMessage] = result.get("messages") or []
-    # MemorySaver returns the whole thread. The UI must only show tools from
+    # The checkpointer returns the whole thread. The UI must only show tools from
     # the latest manager question, otherwise a feasibility answer will look
     # like it also called get_order_status / get_orders_at_risk / trace_order.
     turn = _latest_turn(messages)

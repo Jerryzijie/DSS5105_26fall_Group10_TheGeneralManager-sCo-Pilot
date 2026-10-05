@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import FACTORY_TODAY
-from backend.agent.graph import llm_is_configured, run_agent
+from backend.agent.graph import llm_is_configured, run_agent, set_checkpointer
 from backend.logging_setup import setup_logging
 from backend.models.schemas import (
     ChatRequest,
@@ -22,6 +22,7 @@ from backend.models.schemas import (
     ConfirmActionRequest,
     ConfirmActionResponse,
 )
+from backend.services.checkpoint_store import postgres_checkpointer
 from backend.services.audit import list_audit
 from backend.services.auth import CurrentUser, get_current_user
 from backend.services.briefing import build_morning_briefing
@@ -35,6 +36,12 @@ from backend.routers.data_admin import (
     query_router,
     upload_router,
 )
+from backend.routers.conversations import router as conversations_router
+from backend.services.conversation_history import (
+    ConversationNotFoundError,
+    get_owned_conversation,
+    save_turn,
+)
 from backend.services.watches import evaluate_and_list
 from backend.tools.registry import MVP_TOOLS
 from backend.routers.auth import router as auth_router, users_router
@@ -46,8 +53,17 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app: FastAPI):
     setup_logging()
     init_db()
-    logger.info("SweaterCo co-pilot API ready. LLM configured=%s", llm_is_configured())
-    yield
+
+    with postgres_checkpointer() as checkpointer:
+        set_checkpointer(checkpointer)
+        try:
+            logger.info(
+                "SweaterCo co-pilot API ready. LLM configured=%s",
+                llm_is_configured(),
+            )
+            yield
+        finally:
+            set_checkpointer(None)
 
 
 app = FastAPI(
@@ -74,6 +90,7 @@ app.include_router(datasource_router)
 app.include_router(query_router)
 app.include_router(auth_router)
 app.include_router(users_router)
+app.include_router(conversations_router)
 
 
 @app.get("/api/health")
@@ -87,22 +104,51 @@ def health() -> dict:
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(request: ChatRequest) -> ChatResponse:
-    if not llm_is_configured():
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "LLM key is not set. For Gemini set GOOGLE_API_KEY "
-                "(LLM_PROVIDER=gemini); for GPT set OPENAI_API_KEY. "
-                "Tools still work (run pytest). Copy .env.example to .env "
-                "to enable the agent."
-            ),
-        )
+def chat(request: ChatRequest, user: CurrentUser = Depends(get_current_user),) -> ChatResponse:
+    public_conversation_id = str(request.conversation_id)
+
     try:
-        result = run_agent(request.message, request.conversation_id)
+        # Verify ownership before any model or tool call.
+        get_owned_conversation(user.id, request.conversation_id)
+
+        if not llm_is_configured():
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "LLM key is not set. For Gemini set GOOGLE_API_KEY "
+                    "(LLM_PROVIDER=gemini); for GPT set OPENAI_API_KEY. "
+                    "Tools still work (run pytest). Copy .env.example to .env "
+                    "to enable the agent."
+                ),
+            )
+
+        thread_id = (f"user:{user.id}:conversation:{public_conversation_id}")
+
+        set_current_user(user)
+        try:
+            result = run_agent(request.message, public_conversation_id, thread_id=thread_id,)
+            response_json = {key: value for key, value in result.items() if key not in ("answer", "conversation_id")}
+
+            save_turn(
+                user.id,
+                request.conversation_id,
+                question=request.message,
+                answer=result["answer"],
+                response_json=response_json,
+            )
+        finally:
+            set_current_user(None)
+
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found",) from exc
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("chat failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail="Chat service is temporarily unavailable",
+        ) from exc
     return ChatResponse(**result)
 
 

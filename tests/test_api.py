@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 
 from backend.main import app
@@ -21,14 +23,17 @@ def test_health():
         assert "discover_factory_issues" in body["tools"]
 
 
-def test_chat_without_key_is_503(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    import backend.main as main_mod
-
-    monkeypatch.setattr(main_mod, "llm_is_configured", lambda: False)
+def test_chat_requires_authentication():
     with TestClient(app) as client:
-        res = client.post("/api/chat", json={"message": "How is ORD-120?"})
-        assert res.status_code == 503
+        res = client.post(
+            "/api/chat",
+            json={
+                "message": "How is ORD-120?",
+                "conversation_id": str(uuid4()),
+            },
+        )
+
+    assert res.status_code == 401
 
 
 def test_briefing_endpoint():

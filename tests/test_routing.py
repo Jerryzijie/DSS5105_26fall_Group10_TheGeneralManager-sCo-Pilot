@@ -47,3 +47,41 @@ def test_keyword_short_circuit_does_not_call_llm(monkeypatch):
     assert result["routing_intent"] == UNSUPPORTED
     assert not re.search(r"\$\s*\d", result["answer"])
     assert "cannot answer" in result["answer"].lower()
+
+
+def test_scoped_short_circuit_appends_human_and_ai_messages(monkeypatch):
+    monkeypatch.setattr(
+        "backend.agent.routing._FINANCIAL",
+        re.compile(r"revenues?", re.I),
+    )
+
+    captured = {}
+
+    class FakeAgent:
+        def update_state(self, config, values):
+            captured["config"] = config
+            captured["values"] = values
+
+    monkeypatch.setattr(
+        "backend.agent.graph.get_agent",
+        lambda: FakeAgent(),
+    )
+    monkeypatch.setattr(
+        "backend.agent.graph._audit_turn",
+        lambda *_args, **_kwargs: None,
+    )
+
+    thread_id = "user:42:conversation:00000000-0000-0000-0000-000000000042"
+    result = run_agent(
+        "How much revenue did we make from TrendCart?",
+        "00000000-0000-0000-0000-000000000042",
+        thread_id=thread_id,
+    )
+
+    assert captured["config"] == {
+        "configurable": {"thread_id": thread_id},
+    }
+    messages = captured["values"]["messages"]
+    assert [message.type for message in messages] == ["human", "ai"]
+    assert messages[0].content == "How much revenue did we make from TrendCart?"
+    assert messages[1].content == result["answer"]
