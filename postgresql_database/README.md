@@ -153,11 +153,17 @@ With the project virtual environment activated, run:
 ```powershell
 python -m alembic -c alembic.ini upgrade head
 ```
-Alembic applies each missing revision in order. Revision `001_initial_auth`
-creates the Phase 1 schemas, tables, constraints, indexes, and grants. Revision
-`002_auth_deactivation` adds the account-deactivation fields and constraints.
-The files under `sql/legacy/` are historical references and must not be run
-during bootstrap.
+Alembic applies each missing revision in order:
+
+- `001_initial_auth` creates the initial schemas, tables, constraints, indexes, and grants.
+- `002_auth_deactivation` adds account-deactivation fields and constraints.
+- `003_permissions_reconciliation` makes Alembic authoritative for database object permissions.
+- `004_conversation_history` adds per-user conversations and persisted chat turns.
+
+Run migrations after creating the project roles and database, and whenever a
+pulled release contains a new revision. Apply migrations before starting or
+restarting the backend. FastAPI checks the required baseline at startup but
+does not run Alembic automatically.
 
 
 ### 3. Reset and import the reproducible baseline
