@@ -1,198 +1,256 @@
-# SweaterCo GM Co-Pilot (DSS5105 Track 1)
+# SweaterCo General Manager's Co-Pilot
 
-AI co-pilot for the general manager of a small knitwear factory. The core is a
-**tool-using LangGraph agent**, not a generic chatbot.
+SweaterCo is a DSS5105 Track 1 project for a small knitwear factory. It is a
+tool-using LangGraph agent with a FastAPI backend, a React manager interface,
+and PostgreSQL persistence. It is not a general-purpose chatbot.
 
-This repository is a **working first co-pilot**: inspectable Python tools, a
-chat API, a laptop manager UI, and a development evaluation set. Factory date
-in the dataset: **2026-04-01**. Do not use the computer clock for business logic.
+The factory date represented by the supplied dataset is **2026-04-01**.
+Business rules use this factory date or an explicit `as_of` date; they must not
+silently use the computer clock.
 
-The repository also contains a local PostgreSQL database and an experimental
-PostgreSQL version of the standalone data-administration service. The data
-administration UI is now present in the main application, but its main-system
-data services still use SQLite until the PostgreSQL integration is completed.
+[Chinese documentation / 中文说明](README_CN.md)
 
-Track 1 asks for five kinds of tool (retrieval / judgement / tracing /
-discovery / action), a scheduled briefing, all-day Q&A, standing watches,
-feasibility estimates, confirmed actions, and full traceability. What is
-shipped vs still open is listed below.
+## Current capabilities
 
-## What works now
+- Authenticated `ADMIN` and `EMPLOYEE` accounts.
+- PostgreSQL-backed factory, administration, authentication, Copilot, and
+  conversation data.
+- Retrieval, judgement, tracing, discovery, briefing, and action tools.
+- Per-user conversation lists and persisted chat turns.
+- Conversation restoration after refresh, browser reopen, or backend restart.
+- PostgreSQL-backed LangGraph checkpoints for multi-turn context.
+- User-scoped model thread keys, so users and conversations do not share memory.
+- Explicit Confirm/Dismiss handling for side-effecting actions.
+- Persisted confirmation decisions, so resolved action buttons do not reappear
+  after a history reload.
+- Inspectable source rows and calculations through the **Why?** trace view.
 
-### Data and API
+## Architecture at a glance
 
-- Load `orders.csv`, `production_log.csv`, `workshops.csv` into SQLite
-- Reproduce and validate the local PostgreSQL design under `postgresql_database/`
-- Run the experimental PostgreSQL administration API under `SQL_related_app/`
-- `POST /api/chat` — inspectable pre-router, then LangGraph ReAct for in-scope questions
-- Multi-turn chat with **fresh tool calls each turn** (`conversation_id` + MemorySaver)
-- Unsupported questions (revenue, selling price, workers, …) return a limitation with **no tool call**
-- Lightweight audit in `data/copilot_state.db` (survives CSV reload of `factory.db`)
-- Field meanings for the agent come from `data/semantic_layer.yaml`
+```text
+React manager UI
+    |
+    | Bearer token + conversation UUID
+    v
+FastAPI API
+    |-- authentication and user ownership checks
+    |-- conversation history API
+    |-- deterministic routing and answerability checks
+    |-- LangGraph agent and business tools
+    `-- explicit action confirmation endpoints
+             |
+             v
+PostgreSQL: factory_copilot_db
+    |-- app          factory operational data
+    |-- admin_meta   import and data-source metadata
+    |-- auth         application users
+    `-- copilot      operations, conversations, and checkpoints
+```
 
-### Tools (mapped to the five course kinds)
+Deterministic Python code computes dates, totals, risk flags, feasibility, and
+briefing facts. The LLM selects supported tools and explains their results; it
+must not invent unavailable fields or perform hidden business arithmetic.
 
-| Kind | Tool | What it does |
+## Persistence model
+
+| Data | PostgreSQL location | Purpose |
 |---|---|---|
-| Retrieval | `get_order_status` | One order; asks for an id if several match (e.g. “the TrendCart order”) |
-| Retrieval | `get_orders_at_risk` | Overdue / stalled / tight-deadline. Formulas in Python |
-| Judgement | `check_feasibility` | Capacity estimate for a new order, with stated assumptions |
-| Tracing | `trace_order` | Source `orders.csv` row + computed fields + risk flags |
-| Discovery (filter) | `find_orders` | List **all** matches by customer / product / stage / status. Does not rank “unusual” issues |
-| Discovery (ranked) | `discover_factory_issues` | Top-N issues from defined order-risk + stage-below-baseline rules. Python sorts |
-| Briefing | `get_morning_briefing` | Structured ops facts (reuses at-risk rules, last-day output vs 30-day median, suspended workshops) |
-| Action | `draft_chase_email` | Local draft from order fields. Never sent |
-| Action | `send_email` | Proposal → confirm → **simulated** audit row. Still `sent: false` (no SMTP) |
-| Action | `add_order_note` / `create_reminder` | Proposal → confirm → persist locally. Reminder is a calendar note; it does **not** auto-fire |
-| Action | `create_watch` / `list_watches` / `cancel_watch` | Standing watch. Python evaluates on `GET /api/watches?as_of=`. Cancel requires confirmation |
-| Audit | `get_recent_actions` | Read recent rows from `copilot_state.db` |
+| Orders, production, workshops, snapshots | `app.*` | Factory facts queried by the tools |
+| Upload history and data sources | `admin_meta.*` | Data-administration state |
+| Accounts and account lifecycle | `auth.users` | Login, role, approval, and deactivation |
+| Notes, reminders, watches, audit events | `copilot.*` | Confirmed operational actions |
+| Conversation list and visible turns | `copilot.conversations`, `copilot.chat_turns` | History shown to the manager |
+| LangGraph state | `copilot.checkpoint_*` | Human, AI, and tool context used for follow-up questions |
 
-`production_log.csv` is factory-wide (`date × stage`), not per order. It is used
-inside briefing and feasibility, not as a separate lookup tool.
+Visible chat history and LangGraph checkpoints are intentionally separate. The
+former reconstructs the UI; the latter restores the Agent's internal context.
+Both survive backend restarts.
 
-### Interface
+## Conversation history
 
-- React UI: chat + sidebar snapshot of briefing / **top issues** / **triggered alerts** / **active watches** / recent actions
-- Answer + **“Why?”** traces (source rows and calculations; fired watches expand snapshot evidence)
-- Confirmation is a **UI click** (Confirm / Dismiss on the proposal). Chat “yes” still works as a fallback.
+Conversation endpoints require authentication:
 
-### Standing watches (V1)
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/conversations` | Create a conversation for the current user |
+| `GET /api/conversations?limit=50` | List only the current user's conversations |
+| `GET /api/conversations/{id}` | Read an owned conversation and a paginated turn window |
+| `POST /api/chat` | Run the Agent in an owned conversation and persist the successful turn |
 
-Active watches are evaluated whenever `GET /api/watches` is called, using the
-supplied factory `as_of` date (default **2026-04-01**). This is **not**
-real-time monitoring and **not** a scheduler.
+The server never trusts a client-supplied user ID. It derives the user from the
+access token, verifies conversation ownership, and builds the LangGraph key as:
 
-- Condition: `ORDER_INACTIVE_BY_DATE` — still `IN_PROGRESS` and `last_activity_date` before `check_date`
-- “Hasn't moved” uses `orders.last_activity_date` only. `production_log` is not per-order.
-- Thursday from factory Wednesday 2026-04-01 is **2026-04-02** (Python, not the LLM)
-- On fire: `watch_events` + `audit_log` + sidebar **Triggered alerts**. Same watch never fires twice
-- Cancel: `cancel_watch` after confirmation. The row is **kept** as `CANCELLED` (not deleted). ACTIVE will not evaluate; FIRED leaves the live alert list and stays in watch history
-- `WatchNotifier` is the future email hook. V1 is `LocalWatchNotifier` only (no SMTP)
-- `create_reminder` is unchanged: a local calendar note, not a watch
+```text
+user:{authenticated_user_id}:conversation:{conversation_uuid}
+```
 
-`evaluation/questions.json` is a few-shot wording bank for the agent, not a scoring harness.
+The first successful question becomes the conversation title. The frontend
+stores the last-opened conversation ID under a user-specific browser key,
+reloads its history after login, and creates an empty conversation when the
+user has no history.
 
-## What is not built yet (course gaps first)
+Current scope does not include conversation rename, delete, sharing, or several
+simultaneous in-flight chats. Conversation switching is disabled while a chat
+request is running to prevent an old response from being rendered in a newly
+selected conversation.
 
-These are Track 1 core capabilities that are still missing or only half-done:
+## Confirmed actions
 
-- **Scheduled briefing** — current briefing is on-demand (ask in chat, or the sidebar loads `/api/briefing`). Nothing generates it on a clock. Prose appears only when the agent writes it.
-- **Watch types beyond `ORDER_INACTIVE_BY_DATE`** — no stage-still-in, overdue-as-of, or factory-wide packing-behind watches yet. No scheduler; evaluate by calling the API with `as_of`.
-- **`assess_stage_performance`** — full inspectable “is this stage output normal?” tool. Discovery/briefing only reuse the 0.70 × 30-day-median drop heuristic.
-- **Held-out evaluation file** — add a separate JSON (`meta.usage = "held-out"`) before claiming official accuracy.
-- **Course write-ups** — `Evaluation.pdf` (including ≥10 analysed failure cases), Sprint decks, `GroupX.zip`. Not product code.
+Side-effecting tools follow this lifecycle:
 
-Out of scope for this track (not a course requirement): real SMTP / calendar /
-push, voice in/out, a YAML business ontology.
+```text
+proposal -> explicit Confirm or Dismiss -> persisted decision
+```
+
+`POST /api/actions/confirm` validates that the proposed action belongs to a
+chat turn owned by the authenticated user, executes the whitelisted operation,
+and stores the decision in that turn's `response_json`.
+`POST /api/actions/decline` records the dismissal without executing the proposed
+operation. Refreshing the page restores the resolved state instead of showing
+the same buttons again.
+
+The current action whitelist covers `create_watch`, `cancel_watch`,
+`send_email`, `add_order_note`, and `create_reminder`. Email remains simulated:
+the system writes an audit result but does not send SMTP mail.
+
+## Tools
+
+| Kind | Tool | Purpose |
+|---|---|---|
+| Retrieval | `get_order_status` | Retrieve one order, asking for an ID when a description is ambiguous |
+| Retrieval | `get_orders_at_risk` | Find overdue, stalled, and tight-deadline orders |
+| Judgement | `check_feasibility` | Estimate whether a proposed order fits available capacity |
+| Tracing | `trace_order` | Return source fields, computed fields, and risk evidence |
+| Discovery | `find_orders` | Apply manager-supplied filters |
+| Discovery | `discover_factory_issues` | Rank defined order and production issues |
+| Briefing | `get_morning_briefing` | Return structured morning operating facts |
+| Action | `draft_chase_email` | Produce a local draft without sending it |
+| Action | `send_email` | Propose and simulate a confirmed email action |
+| Action | `add_order_note` | Propose and persist an order note after confirmation |
+| Action | `create_reminder` | Propose and persist a calendar note after confirmation |
+| Action | `create_watch`, `list_watches`, `cancel_watch` | Manage locally evaluated standing watches |
+| Audit | `get_recent_actions` | Read recent Copilot action records |
+
+`production_log` has factory-wide `date x stage` granularity; it is not an
+order-level event log.
+
+## Standing watches
+
+The implemented watch condition is `ORDER_INACTIVE_BY_DATE`. A watch is
+evaluated when `GET /api/watches?as_of=YYYY-MM-DD` runs. This is local,
+request-driven evaluation, not a background scheduler or real-time push system.
+
+- A fired watch produces a `watch_events` row and an audit record.
+- The same watch cannot fire twice.
+- Cancelling retains the row with `status=CANCELLED`; it does not delete history.
+- `LocalWatchNotifier` is the current notification implementation. There is no
+  email or push delivery.
+- A reminder is a stored calendar note and is not evaluated like a watch.
 
 ## Repository layout
 
+```text
+backend/               FastAPI, LangGraph, tools, and runtime services
+frontend/              React, Vite, and Tailwind manager UI
+data/                  Source data, examples, and semantic definitions
+docs/                  Architecture and tool contracts
+evaluation/            Development question set and evaluation material
+postgresql_database/   Database lifecycle, migrations, seed data, and DB tests
+SQL_related_app/       Separate data-administration middleware
+tests/                 Backend and API tests
 ```
-backend/          FastAPI + LangGraph + tools + services
-frontend/         React + Vite + Tailwind
-data/             Track 1 CSVs + semantic_layer.yaml + examples3.0 as-of snapshots
-docs/             architecture.md, tool_spec.md
-evaluation/       Track 1 development evaluation set (not a held-out official score)
-tests/            pytest — no LLM key required
-postgresql_database/  PostgreSQL schema, seed data, validation, and permission tests
-SQL_related_app/      Standalone data-administration app and PostgreSQL experiment
-```
 
-Read `docs/architecture.md` and `docs/tool_spec.md` before changing rules.
-`tool_spec.md` documents behaviour and limits; the course still wants a single
-table of name / input / output / purpose / non-goals / failure mode for the
-final evaluation report.
-
-## Semantic layer
-
-Field meanings for the agent live in `data/semantic_layer.yaml` (also loaded into the system prompt):
-
-- `data_definition` — every stored table/column, including descriptions
-- `term_definition` — special vocabulary that is **not** a stored column (e.g. factory today, selling price, OVERDUE)
-
-Do not put formulas in that file. Arithmetic stays in `backend/services/`. After editing the YAML, restart the backend.
+`SQL_related_app` remains a separate administration component. It may update
+shared factory data, but it does not own Manager conversation history.
 
 ## Prerequisites
 
-- Python 3.10+
-- Node.js 18+
-- An OpenAI-compatible API key **only if you want the chat agent**
-  (pytest and data loading work without a key)
+- Python 3.12 is recommended for the project virtual environment.
+- Node.js 18 or later.
+- A local PostgreSQL server and `psql`.
+- A Gemini or OpenAI-compatible API key only when running LLM-backed chat.
 
-## Backend
+Tests that do not call the LLM can run without an LLM key. PostgreSQL integration
+tests require a configured local test database.
 
-From the project root (PowerShell):
+## Local setup
+
+### 1. Create the Python environment
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 copy .env.example .env
-# Edit .env and set OPENAI_API_KEY (and optionally OPENAI_BASE_URL, LLM_MODEL)
+```
 
-uvicorn backend.main:app --reload --port 8000
+Fill the local `.env` with database credentials, an
+`AUTH_SECRET_KEY` of at least 32 characters, and the selected LLM provider key.
+Never commit `.env`.
+
+### 2. Prepare PostgreSQL
+
+Follow [postgresql_database/README.md](postgresql_database/README.md) for role,
+database, migration, seed, validation, and permission-test commands. The core
+sequence is:
+
+```powershell
+.\.venv\Scripts\python.exe -m alembic -c postgresql_database\alembic.ini upgrade head
+.\.venv\Scripts\python.exe postgresql_database\bootstrap\setup_checkpoints.py
+```
+
+Alembic and checkpoint setup are explicit administration steps. FastAPI does
+not create or migrate database tables at startup.
+
+### 3. Start the backend
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --port 8000
 ```
 
 Health check: [http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health)
 
-## Frontend
+### 4. Start the frontend
 
 ```powershell
-cd frontend
-npm install
-npm run dev
+npm --prefix frontend install
+npm --prefix frontend run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). Vite proxies `/api` to port 8000.
+Open [http://localhost:5173](http://localhost:5173). Vite proxies `/api` to
+port 8000.
 
-## Tests
+## Verification
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-pytest
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest postgresql_database\tests -q
+npm --prefix frontend run build
+git diff --check
 ```
 
-These tests check schemas, date arithmetic, risk flags, routing, and tool JSON. They do not call an LLM.
+See the database README for data-validation and permission-test SQL scripts.
 
-Division of labour:
+## Known limits
 
-- **Tools / Python** compute every number (status, risk flags, feasibility, briefing).
-- **LLM** only selects an in-scope tool and explains the result.
-- **Unsupported questions** must not fire unrelated tools.
-- **Actions** propose first; persist locally only after confirmation. Email is never actually sent.
+- The morning briefing and standing watches have no background scheduler.
+- Email, calendar, and push integrations are local simulations only.
+- `assess_stage_performance` is not a standalone tool; discovery and briefing
+  use the documented production-baseline heuristic.
+- `evaluation/questions.json` is a development/few-shot wording bank, not a
+  held-out accuracy benchmark.
+- One assistant turn currently resolves its proposed-action list as one decision;
+  independent confirmation of several actions in the same turn is not supported.
 
-## Try these questions (after the API key is set)
+## Development rules
 
-- How is ORD-120 doing?
-- How is the TrendCart order doing?  ← should ask which order
-- Which orders are at risk?
-- Why is ORD-120 considered risky?
-- Can we take 800 hoodies by August 25?
-- Give me this morning's briefing
-- What should I be concerned about right now?  ← ranked discovery (not find_orders)
-- List the TrendCart orders
-- Draft a chase-up email for ORD-120
-- Create a reminder to check ORD-005 tomorrow  ← local calendar note; does not auto-fire
-- Tell me if ORD-005 hasn't moved by Thursday  ← standing watch; confirm, then `GET /api/watches?as_of=2026-04-02`
-- Cancel the watch on ORD-005  ← confirm; ACTIVE stops evaluating, FIRED leaves the alert list
-- What is the revenue from TrendCart?  ← should refuse (no price data)
+1. Do not invent fields or business facts absent from the stored data and
+   `data/semantic_layer.yaml`.
+2. Keep arithmetic and business rules in deterministic Python services, not in
+   prompts.
+3. Require explicit confirmation before every side-effecting operation.
+4. Do not claim that an external message or notification was sent.
+5. Apply schema changes through reviewed Alembic migrations; do not create
+   tables during normal application startup.
 
-## Next (remaining product work)
-
-Suggested order so the core Track 1 bar is covered before polish:
-
-1. Scheduled or “open the app → today’s briefing” prose, not only JSON in the sidebar
-2. Optional: `EmailWatchNotifier` behind the existing `WatchNotifier` protocol (condition logic stays in Python)
-3. Held-out evaluation file + failure-case notes for `Evaluation.pdf`
-
-## Rules for teammates
-
-1. Do not invent columns or business facts that are not in `data/` + `data/semantic_layer.yaml` (and the short table overview in `data/data_dictionary.md`).
-2. Do not put totals, day counts, or capacity math in the prompt — add a Python function.
-3. If a design is not supported by the files, leave a `# TODO` instead of guessing.
-4. Side-effecting actions must never run without an explicit confirmation, and must never claim an external email was sent.
-
-## Logging
-
-API logs go to the console and `logs/app.log`. Query/tool/action traces also go
-to `data/copilot_state.db` (gitignored; survives CSV reload of `factory.db`).
+Read [docs/architecture.md](docs/architecture.md) and
+[docs/tool_spec.md](docs/tool_spec.md) before changing system behaviour.

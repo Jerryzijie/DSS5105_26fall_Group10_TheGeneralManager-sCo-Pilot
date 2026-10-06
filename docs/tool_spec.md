@@ -211,16 +211,20 @@ Top-N may omit P3 stage issues when many P1 overdue orders exist; see
 
 There is **no SMTP, SMS, or calendar integration**.
 
-Confirmation is a **UI click** on Confirm (or a chat “yes” fallback). The
-browser posts the `proposed_action` to `POST /api/actions/confirm`; Python
-re-invokes the same tool with `confirmed=true`. The LLM is not in that path.
+Confirmation is an authenticated **UI click** on Confirm. The browser posts the
+stored `proposed_action` and its chat-turn identifier to
+`POST /api/actions/confirm`. The backend verifies that both the conversation
+and proposal belong to the current user, then re-invokes the whitelisted tool
+with `confirmed=true`. The LLM is not in that path. Dismiss uses
+`POST /api/actions/decline`, does not execute the operation, and persists the
+resolved UI decision in the originating chat turn.
 
 | Tool | Default (`confirmed=false`) | After explicit confirmation |
 |---|---|---|
 | `draft_chase_email` | Local draft from order fields. `sent: false` | n/a (drafting does not send) |
 | `send_email` | Proposal only. `sent: false` | Audit row with `execution_status=SIMULATED`. Still `sent: false` |
-| `add_order_note` | Proposal only. `saved: false` | Row in `copilot_state.db` |
-| `create_reminder` | Proposal only. `saved: false` | Row in `copilot_state.db`. `notified: false` |
+| `add_order_note` | Proposal only. `saved: false` | Row in `copilot.order_notes` |
+| `create_reminder` | Proposal only. `saved: false` | Row in `copilot.reminders`; no external notification |
 
 `remind_on` is a factory-calendar ISO date. "Tomorrow" from 2026-04-01 is **2026-04-02**.
 
@@ -286,7 +290,7 @@ condition → `INVALID_INPUT`; unparseable date → `INVALID_INPUT`.
 
 ## `list_watches` (read)
 
-Returns **all** standing watches from `copilot_state.db`, including
+Returns **all** standing watches from `copilot.watches`, including
 `CANCELLED`. Optional `order_id` filter.
 
 Cancel does **not** delete the row. If the manager asks "did we ever watch
@@ -325,9 +329,10 @@ Same confirmation pattern as create:
 
 ## `get_recent_actions` (audit read)
 
-Returns recent rows from `copilot_state.db`: user query, tool, inputs, result
-summary, confirmation/execution status. This file is **not** wiped when
-`factory.db` is rebuilt from CSV.
+Returns recent rows from `copilot.audit_log`: user query, tool, inputs, result
+summary, and confirmation/execution status. Operational audit data is separate
+from the `app` business tables and is not cleared by the baseline business-data
+import.
 
 ---
 

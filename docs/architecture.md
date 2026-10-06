@@ -1,128 +1,207 @@
-# Architecture — SweaterCo GM Co-Pilot (MVP)
+# Architecture — SweaterCo General Manager's Co-Pilot
 
-This document is for teammates who are new to the stack. Read it before editing code.
+This document describes the current integrated application. Read it before
+changing runtime behaviour, database ownership, authentication, or Agent state.
 
-## What we are building
+## System boundary
 
-A **tool-using agent**, not a chatbot and not a dashboard.
+SweaterCo is a grounded, tool-using Agent rather than a general chatbot. The
+manager asks an operational question, deterministic code decides whether the
+stored data and registered tools can support it, LangGraph selects tools when
+needed, and Python services compute business results.
 
-The manager asks a question in natural language. A small **inspectable pre-router**
-(`backend/agent/routing.py`) first checks whether the requested field exists in
-the Track 1 tables. If it does not (revenue, selling price, worker names, …) the
-system answers with a limitation and **does not call a tool**.
-
-In-scope questions go to the LangGraph ReAct agent. The LLM only selects a
-registered tool and explains the tool result. Deterministic Python tools do all
-arithmetic.
-
-```
-Manager (React UI)
-        │
-        ▼
- FastAPI  /api/chat
-        │
-        ▼
- Inspectable router  ── unsupported ──► answer, no tools
-        │
-        ▼
- LangGraph ReAct agent
-        │
-        ├── get_order_status      (retrieval)
-        ├── get_orders_at_risk    (retrieval)
-        ├── get_morning_briefing  (structured briefing)
-        ├── find_orders           (user-directed discovery)
-        ├── discover_factory_issues (ranked discovery)
-        ├── trace_order           (tracing)
-        ├── check_feasibility     (judgement)
-        ├── draft_chase_email / send_email / add_order_note / create_reminder
-        ├── create_watch / list_watches / cancel_watch
-        └── get_recent_actions    (audit read)
-                │
-                ▼
-         services/  (SQLite + calculations)
-                │
-                ▼
-         data/*.csv
+```text
+Authenticated manager
+        |
+        v
+React UI
+        |
+        | access token + conversation UUID
+        v
+FastAPI
+        |-- verify user and conversation ownership
+        |-- answerability and deterministic routing
+        |-- LangGraph ReAct Agent
+        |-- conversation history persistence
+        `-- explicit action confirmation
+                |
+                v
+PostgreSQL
+        |-- app.*                 factory facts
+        |-- admin_meta.*          data-management metadata
+        |-- auth.users            application identities
+        |-- copilot.conversations visible conversation list
+        |-- copilot.chat_turns    visible user/assistant turns
+        |-- copilot.checkpoint_*  LangGraph state
+        `-- copilot operational tables and audit log
 ```
 
-## Layers (do not mix them)
+The dataset clock is `FACTORY_TODAY = 2026-04-01`. Business calculations use
+that value or an explicit factory `as_of` date, not `date.today()`.
 
-| Layer | Folder | Allowed to do | Must not do |
+## Layer responsibilities
+
+| Layer | Main location | Owns | Must not own |
 |---|---|---|---|
-| UI | `frontend/` | Display answers, traces, later confirmations | Business rules, SQL, arithmetic |
-| API | `backend/main.py` | HTTP, CORS, health | Judgement logic |
-| Agent | `backend/agent/` | Choose tools, write the reply | Invent numbers or data |
-| Tools | `backend/tools/` | Call services, return JSON + trace | Hide rules in the prompt |
-| Services | `backend/services/` | SQL, date math, risk, feasibility | Call the LLM |
-| Semantic | `data/semantic_layer.yaml` | `data_definition` (columns + descriptions) + `term_definition` (jargon) | Arithmetic, invented columns |
-| Data | `data/` | Source CSVs | — |
+| UI | `frontend/` | Rendering, navigation, local interaction state | SQL, business calculations |
+| API | `backend/main.py`, `backend/routers/` | HTTP contracts, authentication dependencies, status codes | Hidden judgement rules |
+| Agent | `backend/agent/` | Tool selection and grounded final wording | Invented fields or business arithmetic |
+| Tools | `backend/tools/` | Typed Agent-facing wrappers | Database schema management |
+| Services | `backend/services/` | Runtime queries, transactions, calculations | Alembic migrations |
+| Database module | `postgresql_database/` | Roles, migrations, checkpoint bootstrap, seed and DB tests | HTTP and UI behaviour |
+| Semantic layer | `data/semantic_layer.yaml` | Stored-field meanings and defined terms | Formulas and mutable state |
 
-## Dataset clock
+`SQL_related_app` is a separate data-administration component. It can update the
+shared operational dataset, but it does not own authentication, Manager chat
+history, or LangGraph memory.
 
-Business logic uses **`FACTORY_TODAY = 2026-04-01`**, not the computer's date.
-The factory is closed on Sundays.
+## Database ownership
 
-## Why SQLite, not DuckDB
+The canonical structure is managed under `postgresql_database/`:
 
-Three small clean tables. SQLite is in the Python standard library, and teammates
-can open `data/factory.db` in any viewer. Rebuilt from CSV on every API startup.
+1. `sql/01_roles_and_database.sql` creates roles and the project database.
+2. Alembic migrations create schemas, tables, constraints, indexes, and grants.
+3. `bootstrap/setup_checkpoints.py` lets the official `PostgresSaver` create its
+   version-compatible checkpoint tables in the `copilot` schema.
+4. Seed, validation, and permission scripts reproduce and verify local data.
 
-## Agent
+FastAPI checks that the operational baseline exists, but it does not run
+migrations or create checkpoint tables during startup.
 
-`langgraph.prebuilt.create_react_agent` with the registered tools and a `MemorySaver`
-so one `conversation_id` keeps multi-turn context (e.g. "the first one").
-The API reports **only the tools used after the latest user message**. A
-feasibility answer must not list retrieval tools left over from earlier
-questions in the same chat.
+The runtime uses two database identities:
 
-If `OPENAI_API_KEY` is missing, tools, the pre-router, and pytest still work;
-`/api/chat` for in-scope questions returns 503. Unsupported questions are
-answered without an API key because they never reach the LLM.
+- `factory_agent` inherits read-only access to `app` for normal factory queries.
+- `factory_admin` is the trusted identity for authentication, conversation
+  persistence, confirmed operations, and administrative data changes.
 
-Any OpenAI-compatible endpoint works (`OPENAI_BASE_URL` + `LLM_MODEL`).
+Ordinary login roles cannot read `auth`, `admin_meta`, or `copilot` directly.
+Website users access those schemas only through authenticated API routes.
 
-`evaluation/questions.json` is the few-shot answer-template bank (not an eval runner).
+## Authenticated conversation flow
 
-Side-effecting actions follow: propose → UI Confirm click → local execute → audit log.
-The agent only proposes (`confirmed=false`). `POST /api/actions/confirm` runs the
-whitelisted tool with `confirmed=true` and does **not** call the LLM. Dismiss
-(`POST /api/actions/decline`) writes an audit row and saves nothing. Chat “yes”
-still works as a fallback. There is no SMTP. Confirmed "send email" writes a
-**simulated** audit row and still reports `sent: false`. Notes, reminders, and
-standing watches persist in `copilot_state.db`, which is separate from
-`factory.db` so CSV reload does not wipe them.
+```text
+1. Browser sends POST /api/chat with an access token, message, and UUID.
+2. FastAPI derives the current user from the token.
+3. The service verifies (conversation UUID, user ID) ownership.
+4. The server builds user:{user_id}:conversation:{uuid}.
+5. LangGraph loads the matching PostgreSQL checkpoint.
+6. The Agent answers and PostgresSaver commits graph state.
+7. The API saves the visible question, answer, traces, and proposals in chat_turns.
+8. The frontend refreshes the conversation list and renders the response.
+```
 
-**Reminders vs standing watches:** `create_reminder` stores a calendar note
-(`remind_on` + free-text message). Python does **not** evaluate that message.
-`create_watch` stores a typed condition (`ORDER_INACTIVE_BY_DATE`). Python
-evaluates it when `GET /api/watches?as_of=YYYY-MM-DD` runs. There is no
-scheduler and no `date.today()` — callers pass a factory `as_of` date
-(default `FACTORY_TODAY`). `cancel_watch` sets `status=CANCELLED` after
-confirmation — the row is **not deleted**, so `list_watches` can still answer
-"was there a watch?". ACTIVE stops evaluating; FIRED leaves the live alerts
-list and appears under cancelled history. A
-`WatchNotifier` protocol delivers alerts after the watch is already `FIRED`;
-V1 only has `LocalWatchNotifier`. Email would plug in later without changing
-the condition.
+Unknown conversations and conversations owned by another user both return 404,
+so the API does not disclose whether another user's UUID exists.
 
-**Ranked vs filtered discovery:** `find_orders` only applies the manager's
-filters. `discover_factory_issues` walks defined Python rules (order risk +
-stage-below-baseline), assigns priority, and returns Top N. It is read-only
-and is not a general anomaly detector. `GET /api/discovery?limit=5` exposes
-the same service as the tool.
+### Two complementary histories
 
-## What is intentionally missing
+`copilot.chat_turns` and `copilot.checkpoint_*` are not duplicates:
 
-- `assess_stage_performance` (beyond the briefing/discovery last-day vs median check)
-- Real email / calendar / push integrations (watches fire as local alerts)
-- A background scheduler (watches evaluate when `/api/watches` is called)
-- Wiring Copilot tools to PostgreSQL `app.snapshot` (agent still reads CSVs / SQLite)
+- `chat_turns` is a stable application record used to rebuild message bubbles,
+  traces, action proposals, and decisions.
+- checkpoint tables are LangGraph's internal state used for Human, AI, and Tool
+  context during follow-up questions.
 
-## Adding a new tool (later)
+Short-circuited answers that do not execute a full Agent invocation are also
+appended to checkpoint state so later questions see a continuous conversation.
 
-1. Put arithmetic in `backend/services/`.
-2. Wrap it in `backend/tools/<category>.py` with `@tool`.
-3. Return `{ok, tool, data, trace}` or `{ok: false, error}`.
-4. Register it in `backend/tools/registry.py`.
-5. Add a pytest that does not need an LLM.
-6. Document the formula in `docs/tool_spec.md`.
+## Frontend restoration flow
+
+After authentication, the frontend:
+
+1. clears any previous user's in-memory messages;
+2. fetches only the current user's conversation list;
+3. restores the user-specific last-opened conversation ID when it still exists;
+4. otherwise opens the newest conversation;
+5. creates a blank conversation if no history exists;
+6. fetches its history and reconstructs the message bubbles.
+
+History requests have cancellation guards so a slow response for an older
+selection cannot overwrite a newer selection. Switching and creating
+conversations are disabled while a chat request is running; simultaneous
+in-flight conversations are outside the current scope.
+
+## Action confirmation flow
+
+The Agent may propose an action but cannot silently execute it.
+
+```text
+Agent proposal
+    |
+    v
+chat_turns.response_json.proposed_actions
+    |
+    +-- Confirm --> validate ownership and proposal --> execute whitelist tool
+    |                                             `--> persist confirmed decision
+    |
+    `-- Dismiss --> validate ownership and proposal --> do not execute tool
+                                                  `--> persist dismissed decision
+```
+
+The validation joins `chat_turns` to `conversations` and checks the authenticated
+user. The client-only `_turn_id` is removed before comparing the submitted
+action with the stored proposal.
+
+Confirmed business effects are stored in their operational tables, such as
+`watches`, `reminders`, or `order_notes`. The UI decision is separately stored
+inside the originating turn's `response_json`. This is why both the operation
+and its resolved button state survive a refresh.
+
+Email remains simulated and never claims an SMTP delivery. One turn currently
+resolves its proposed-action list as a single decision; independently resolving
+several proposals from one assistant message is not supported.
+
+## Agent and tools
+
+The registered tool families are:
+
+- retrieval: order status and risk lists;
+- judgement: feasibility estimation;
+- tracing: source fields and calculations;
+- discovery: filtered orders and ranked factory issues;
+- briefing: structured current operating facts;
+- actions: drafts, simulated email, notes, reminders, and watches;
+- audit: recent confirmed or declined operations.
+
+The Agent reports only tools used after the latest user message. It must not
+reuse stale tool names from an earlier turn as if they were called again.
+
+If no LLM key is configured, deterministic endpoints and tests still work.
+An in-scope `/api/chat` request that requires the LLM returns 503. Unsupported
+questions can be rejected locally without making an LLM call.
+
+## Watches and reminders
+
+`create_reminder` stores a calendar note. Python does not parse or continuously
+evaluate its free-text message.
+
+`create_watch` stores a typed condition. The current
+`ORDER_INACTIVE_BY_DATE` condition is evaluated when `GET /api/watches` runs
+with an explicit or default factory date. There is no background scheduler.
+Cancelling retains the row as `CANCELLED`; firing creates one `watch_events`
+record and uses the local notifier implementation.
+
+## Intentional limits
+
+- No real SMTP, calendar, or push integration.
+- No background scheduler for briefings or watches.
+- No conversation rename, delete, sharing, or cross-conversation memory.
+- No concurrent background requests in several conversations.
+- No standalone `assess_stage_performance` tool beyond the documented baseline
+  comparison reused by briefing and discovery.
+- No held-out accuracy claim from `evaluation/questions.json`; it remains a
+  development and few-shot wording resource.
+
+## Adding a tool
+
+1. Put deterministic calculations and data access in `backend/services/`.
+2. Add a typed `@tool` wrapper under `backend/tools/`.
+3. Return an inspectable success or failure payload with trace evidence.
+4. Register the tool in `backend/tools/registry.py`.
+5. Add tests that do not require an LLM call.
+6. Document purpose, input, output, non-goals, and failure modes in
+   `docs/tool_spec.md`.
+
+Schema changes follow a separate path: add a reviewed Alembic revision under
+`postgresql_database/migrations/versions/`, then run migration, permission, and
+repository tests before application tests.

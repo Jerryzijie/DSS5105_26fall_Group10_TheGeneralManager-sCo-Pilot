@@ -18,6 +18,8 @@ run automatically when the application starts.
 - Database: `factory_copilot_db`
 - Business schema: `app`
 - Administration schema: `admin_meta`
+- Authentication schema: `auth`
+- Copilot schema: `copilot`
 - Project administrator: `factory_admin`
 - Shared read-only permission role: `factory_reader` (`NOLOGIN`)
 - Ordinary read-only login: `factory_user`
@@ -48,16 +50,39 @@ The `admin_meta` schema contains:
 
 Only `factory_admin` can access this schema. The two read-only login roles cannot inspect upload metadata.
 
+### Authentication and Copilot tables
+
+The `auth.users` table stores website identities, roles, approval state, login
+timestamps, and account deactivation metadata.
+
+The `copilot` schema contains operational actions and Manager conversation
+state:
+
+- `audit_log`, `order_notes`, `reminders`, `watches`, and `watch_events` store
+  Copilot operations and their audit trail;
+- `conversations` stores user-owned conversation headers;
+- `chat_turns` stores visible question/answer pairs and response metadata;
+- `checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, and
+  `checkpoint_writes` store LangGraph's internal conversation state.
+
+The visible chat history and LangGraph checkpoint state serve different
+purposes. `chat_turns` rebuilds the UI, while checkpoint tables restore model
+and tool context for follow-up questions.
+
 ## Directory structure
 
 ```text
 postgresql_database/
 |-- alembic.ini
+|-- bootstrap/
+|   `-- setup_checkpoints.py
 |-- migrations/
 |   |-- env.py
 |   `-- versions/
 |       |-- 001_initial_auth.py
-|       `-- 002_auth_deactivation.py
+|       |-- 002_auth_deactivation.py
+|       |-- 003_permissions_reconciliation.py
+|       `-- 004_conversation_history.py
 |-- data/
 |-- docs/
 |-- evidence/
@@ -70,6 +95,9 @@ postgresql_database/
 |   |-- 04_validate.sql
 |   |-- 05_admin_permission_test.sql
 |   `-- 06_readonly_permission_test.sql
+|-- tests/
+|   |-- test_checkpoint_persistence.py
+|   `-- test_conversation_history.py
 `-- README.md
 ```
 
@@ -165,8 +193,26 @@ pulled release contains a new revision. Apply migrations before starting or
 restarting the backend. FastAPI checks the required baseline at startup but
 does not run Alembic automatically.
 
+### 3. Initialise LangGraph checkpoint tables
 
-### 3. Reset and import the reproducible baseline
+While still in `postgresql_database`, run:
+
+```powershell
+..\.venv\Scripts\python.exe bootstrap\setup_checkpoints.py
+```
+
+This calls the official `PostgresSaver.setup()` implementation with the
+`copilot` schema in the connection search path. It creates or upgrades the
+checkpoint tables expected by the installed `langgraph-checkpoint-postgres`
+version. Do not copy those third-party table definitions into an Alembic
+migration.
+
+Checkpoint setup is an explicit database-administration step. The FastAPI
+lifespan opens and closes the runtime connection pool but does not call
+`setup()`.
+
+
+### 4. Reset and import the reproducible baseline
 
 Run as `factory_admin`:
 
@@ -187,7 +233,7 @@ If any step fails, PostgreSQL rolls back the entire baseline reset and import.
 
 This script is for initialisation and reproducible reset, not normal daily updates. Rerunning it deletes any order-state history accumulated after the baseline and restores the tracked 223-row seed. Use the application upload API for daily replacement of `orders`, `production_log`, or `workshops`.
 
-### 4. Validate data and metadata
+### 5. Validate data and metadata
 
 ```powershell
 psql -X -h localhost -p 5432 -U factory_admin -d factory_copilot_db -W -f "sql/04_validate.sql"
@@ -227,7 +273,7 @@ VALIDATION PASSED: metadata counts, workshop profiles, and snapshot states are c
 
 A metadata mismatch, inconsistent workshop profile, or missing current order state raises an exception and returns a non-zero `psql` exit code.
 
-### 5. Test administrator permissions
+### 6. Test administrator permissions
 
 ```powershell
 psql -X -h localhost -p 5432 -U factory_admin -d factory_copilot_db -W -f "sql/05_admin_permission_test.sql"
@@ -243,7 +289,7 @@ Expected behaviour:
 
 The test does not persist its probe table or modify the four business tables.
 
-### 6. Test read-only permissions
+### 7. Test read-only permissions
 
 Run with either inherited read-only login. The Agent example is:
 
@@ -279,6 +325,8 @@ Immediately after the baseline import, the final counts should show 120 `orders`
 
 - `01_roles_and_database.sql`: initial setup only;
 - `python -m alembic -c alembic.ini upgrade head`: safe to rerun; Alembic applies only missing revisions;
+- `bootstrap/setup_checkpoints.py`: safe to rerun when using the installed
+  checkpoint package; its migration table tracks the library schema version;
 - files under `sql/legacy/`: historical reference only; do not run during bootstrap;
 - `03_import.sql`: technically rerunnable, but destructive to post-baseline snapshot history; it resets all four `app` tables to the tracked baseline files;
 - `04_validate.sql`: safe to rerun;
@@ -289,7 +337,7 @@ Do not delete a database, schema, table or role merely to resolve an `already ex
 
 ## Connect the administration app
 
-After completing Steps 1–3, configure and run the local FastAPI/React administration app using [`../SQL_related_app/README.md`](../SQL_related_app/README.md).
+After completing Steps 1–4, configure and run the local FastAPI/React administration app using [`../SQL_related_app/README.md`](../SQL_related_app/README.md).
 
 `SQL_related_app` remains a standalone data-administration middleware. It
 handles file preview, validation, transactional imports, data-source metadata,
@@ -326,4 +374,6 @@ These documents should describe the current SQL files. They must not contain pas
 - Use `factory_admin` only for maintenance and trusted administration endpoints.
 - Use `factory_agent` for AI read-only access.
 - The current deployment is local and is not a shared production server.
-- The route name `/api/admin` does not itself authenticate a human administrator; application authentication remains a team integration decision.
+- Website authentication and role checks are implemented by the main FastAPI
+  application. Database-role permissions remain a separate defence boundary;
+  an `ADMIN` website account is not the same identity as `factory_admin`.

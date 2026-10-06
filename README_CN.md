@@ -1,534 +1,239 @@
-# SweaterCo GM Co-Pilot（DSS5105 Track 1）
+# SweaterCo 总经理 Co-Pilot
 
-面向小型针织服装工厂总经理的 **AI 管理 Co-Pilot**。
+SweaterCo 是 DSS5105 Track 1 项目，面向小型针织服装工厂的总经理。项目
+由能够调用业务工具的 LangGraph Agent、FastAPI 后端、React 管理端和
+PostgreSQL 持久化层组成，不是通用聊天机器人。
 
-本项目的核心是一个**基于 LangGraph、能够调用业务工具的 Agent（Tool-Using Agent）**，而不是一个通用聊天机器人。
+数据集表示的工厂业务日期是 **2026-04-01**。业务规则必须使用该日期或
+调用方明确传入的 `as_of` 日期，不能悄悄改用计算机系统时间。
 
-当前仓库实现了一个**可运行的第一版 Co-Pilot**，包括：
+[English documentation](README.md)
 
-* 可检查、可追溯的 Python 业务工具
-* Chat API
-* 基于 React 的管理端 UI
-* 开发阶段评测集
+## 当前能力
 
-> **数据集中的工厂业务日期：2026-04-01**
->
-> 业务逻辑中的日期不使用计算机系统当前时间。
+- 支持 `ADMIN` 和 `EMPLOYEE` 账号认证。
+- 工厂数据、管理元数据、用户、Copilot 操作和聊天记录均使用 PostgreSQL。
+- 提供检索、判断、追踪、发现、简报和操作类工具。
+- 按用户保存会话列表和每轮聊天记录。
+- 页面刷新、重新打开浏览器或重启后端后可以恢复历史对话。
+- 使用 PostgreSQL LangGraph checkpoint 恢复多轮上下文。
+- 模型 thread key 同时包含用户 ID 和会话 UUID，用户与会话之间不会共享记忆。
+- 有副作用的操作必须经过 Confirm 或 Dismiss。
+- Confirm/Dismiss 的决定会写入聊天轮次，刷新后不会再次出现同一组待处理按钮。
+- **Why?** 区域可以展示来源行、工具和计算过程。
 
-Track 1 要求系统具备五类工具能力：
-
-**Retrieval / Judgement / Tracing / Discovery / Action**
-
-同时还要求支持：
-
-* 定时运营简报（Scheduled Briefing）
-* 全天候问答（All-day Q&A）
-* 持续监控（Standing Watches）
-* 生产可行性估算（Feasibility Estimates）
-* 经确认后的操作（Confirmed Actions）
-* 完整的可追溯性（Full Traceability）
-
-下面列出了目前已经实现的功能，以及仍待完成的课程要求。
-
----
-
-## What Works Now｜当前已实现
-
-### Data and API｜数据与 API
-
-* 加载 `orders.csv`、`production_log.csv`、`workshops.csv` 至 SQLite
-* `POST /api/chat` — 经过可检查的 Pre-router 后，将业务范围内的问题交给 LangGraph ReAct Agent
-* 支持多轮对话，并且**每一轮都会重新调用工具获取最新数据**
-
-  * 使用 `conversation_id` + `MemorySaver` 管理会话
-* 对超出系统能力范围的问题（收入、销售价格、员工数量等）返回能力限制，**不会调用无关工具**
-* 使用 `data/copilot_state.db` 进行轻量级审计
-
-  * 即使重新加载 `factory.db` 中的 CSV 数据，审计记录仍会保留
-
-### Tools｜工具
-
-项目中的工具按照课程要求映射为五类：
-
-| 类型        | 工具                                   | 功能                                                                |
-| --------- | ------------------------------------ | ----------------------------------------------------------------- |
-| Retrieval | `get_order_status`                   | 查询单个订单；如果存在多个匹配结果，会要求用户进一步提供订单 ID，例如 “the TrendCart order”        |
-| Retrieval | `get_orders_at_risk`                 | 识别逾期、生产停滞、交期紧张的订单；风险公式由 Python 计算                                 |
-| Judgement | `check_feasibility`                  | 对新订单进行产能可行性估算，并明确列出计算假设                                           |
-| Tracing   | `trace_order`                        | 查看 `orders.csv` 中对应的原始数据行、计算字段以及风险标记                              |
-| Discovery | `find_orders`                        | 根据客户、产品、生产阶段、状态等条件列出**所有匹配订单**（用户指定筛选）          |
-| Discovery | `discover_factory_issues`            | 按已定义规则主动发现并排序 Top N 问题（订单风险 + 阶段产量偏低） |
-| Briefing  | `get_morning_briefing`               | 生成结构化生产运营信息，包括风险订单、最近一天产量与 30 天中位数对比、暂停生产的车间等                     |
-| Action    | `draft_chase_email`                  | 根据订单信息生成本地催单邮件草稿，不会发送                                             |
-| Action    | `send_email`                         | Proposal → Confirm → **模拟执行**并写入审计记录；目前仍为 `sent: false`，没有真实 SMTP |
-| Action    | `add_order_note` / `create_reminder` | Proposal → Confirm → 在本地持久化                                       |
-| Audit     | `get_recent_actions`                 | 从 `copilot_state.db` 中读取最近的操作记录                                   |
-
-> `production_log.csv` 是**整个工厂范围的数据**，粒度为 `date × stage`，并非单个订单的生产记录。
->
-> 因此它主要用于生产早报和产能可行性分析，而不是作为独立的订单查询工具。
-
----
-
-## Interface｜用户界面
-
-当前 React 管理端提供：
-
-* 对话式 Chat
-* 侧边栏运营快照
-
-  * Morning Briefing
-  * Top Issues
-  * Triggered alerts / Active watches
-  * Recent Actions
-* 回答及 **“Why?”** 追踪信息
-
-  * 原始数据行
-  * 计算过程
-* 操作确认：消息上的 **Confirm / Dismiss**（聊天 “yes” 仍可用）
-
----
-
-`evaluation/questions.json` 是 few-shot 答法模板库，不是评测 runner。
-
----
-
-# What Is Not Built Yet｜尚未完成
-
-以下是 Track 1 中目前仍缺失或只完成了一部分的核心能力。
-
-### 1. Scheduled Briefing｜定时运营简报
-
-目前的 Briefing 只能：
-
-* 用户主动在 Chat 中询问
-* 或由侧边栏请求 `/api/briefing`
-
-系统目前**不会按照时间自动生成 Briefing**。
-
-此外，目前只有 Agent 在生成自然语言回答时才会产生 prose；侧边栏主要加载结构化 JSON 数据。
-
----
-
-### 2. Standing Watches｜持续监控
-
-目前 `create_reminder` 只能保存一条本地记录：
+## 总体结构
 
 ```text
-notified: false
+React 管理端
+    |
+    | Bearer Token + conversation UUID
+    v
+FastAPI API
+    |-- 登录认证与会话所有权检查
+    |-- 历史会话 API
+    |-- 可检查的路由与可回答性判断
+    |-- LangGraph Agent 与业务工具
+    `-- 明确的操作确认 API
+             |
+             v
+PostgreSQL: factory_copilot_db
+    |-- app          工厂业务数据
+    |-- admin_meta   文件导入与数据源元数据
+    |-- auth         网站用户
+    `-- copilot      操作记录、历史对话与模型 checkpoint
 ```
 
-系统还没有真正持续检查：
+日期、总数、风险标记、可行性和简报事实由确定性的 Python 代码计算。LLM
+负责选择受支持的工具并解释结果，不得编造数据库中不存在的字段，也不得把
+隐藏的业务计算塞进 Prompt。
 
-> “ORD-058 到周四之前仍然没有任何进展。”
+## 持久化分工
 
-并在满足条件后主动提醒经理。
+| 数据 | PostgreSQL 位置 | 用途 |
+|---|---|---|
+| 订单、生产、车间、状态快照 | `app.*` | Agent 查询的工厂事实 |
+| 上传历史和数据源 | `admin_meta.*` | 数据管理状态 |
+| 账号与账号生命周期 | `auth.users` | 登录、角色、审批和停用 |
+| 备注、提醒、监控和审计事件 | `copilot.*` | 已确认的业务操作 |
+| 会话列表和可见聊天轮次 | `copilot.conversations`、`copilot.chat_turns` | 前端历史记录 |
+| LangGraph 状态 | `copilot.checkpoint_*` | 追问所需的 Human、AI 和 Tool 上下文 |
 
-也就是说，目前有 **Reminder**，但还没有真正的 **Standing Watch / Monitoring Loop**。
+可见聊天历史与 LangGraph checkpoint 是两套用途不同的持久化：前者负责
+重建页面，后者负责恢复 Agent 内部上下文。两者都能跨越后端重启保留。
 
----
+## 历史会话
 
-### 3. Ranked Discovery｜主动发现并排序工厂问题
+以下接口都要求登录：
 
-V1 已注册 `discover_factory_issues`。
+| 接口 | 用途 |
+|---|---|
+| `POST /api/conversations` | 为当前用户创建新会话 |
+| `GET /api/conversations?limit=50` | 只列出当前用户的会话 |
+| `GET /api/conversations/{id}` | 读取本人会话及分页历史窗口 |
+| `POST /api/chat` | 在本人会话中调用 Agent，并保存成功的聊天轮次 |
 
-* `find_orders` 仍只做用户指定的条件筛选
-* `discover_factory_issues` 按已定义规则主动找出订单风险和阶段产量偏低，并由 Python 排序
-* 不是万能异常检测器；不会用 LLM 写 SQL，也没有副作用
-
-阶段产量规则仍是 briefing 里那条 `0.70 × 30 天中位数`，不是完整的 `assess_stage_performance`。
-
----
-
-### 4. `assess_stage_performance`｜生产阶段绩效分析
-
-目前还没有完整、可检查的：
-
-> “这个生产阶段当前产量是否正常？”
-
-工具。
-
-Morning Briefing 中目前只有一个简单的：
+后端不会接受客户端自行声明的用户 ID，而是从访问令牌得到当前用户，验证会话
+所有权，并生成：
 
 ```text
-当前产量 < 0.70 × 过去 30 天中位数
+user:{authenticated_user_id}:conversation:{conversation_uuid}
 ```
 
-的下降启发式判断。
+第一条成功问题会成为会话标题。前端使用按用户区分的浏览器键保存最后打开的
+会话 ID；用户登录后会恢复该会话，没有历史时则创建一个空会话。
 
----
+当前范围不包含会话重命名、删除、分享，也不支持多个会话同时在后台请求。
+聊天请求进行时会暂时禁止切换会话，避免旧请求的结果显示到新会话中。
 
-### 5. Confirmation UI｜独立确认界面
+## 操作确认
 
-Agent 只提出方案（`confirmed=false`）。消息上出现 **Confirm / Dismiss**：
-
-* 点 **Confirm** → `POST /api/actions/confirm`，服务端以 `confirmed=true` 执行白名单工具（不经过 LLM）
-* 点 **Dismiss** → 只记审计，不落库
-
-这仍然满足课程要求的二次确认。聊天里回复 “yes” 仍可作为备用。
-
----
-
-### 6. Held-out Evaluation｜独立测试集
-
-目前还没有正式的 Held-out Evaluation 文件。
-
-在对外声称正式准确率之前，需要添加一个独立 JSON 数据集，例如：
-
-```json
-{
-  "meta": {
-    "usage": "held-out"
-  }
-}
-```
-
----
-
-### 7. Course Write-ups｜课程交付材料
-
-以下属于课程交付物，而非产品代码：
-
-* `Evaluation.pdf`
-
-  * 包括至少 10 个失败案例分析
-* Sprint Decks
-* `GroupX.zip`
-
----
-
-## Out of Scope｜本 Track 不要求
-
-以下功能不属于本 Track 的课程要求：
-
-* 真实 SMTP 邮件发送
-* 真实日历集成
-* 真实 Push Notification
-* Voice Input / Output
-* YAML Business Ontology
-
----
-
-# Repository Layout｜项目结构
+所有有副作用的工具遵循：
 
 ```text
-backend/          FastAPI + LangGraph + tools + services
-frontend/         React + Vite + Tailwind
-data/             Track 1 CSV 数据集（Source of Truth）
-docs/             architecture.md、tool_spec.md
-evaluation/       Track 1 开发阶段评测集（非正式 Held-out Score）
-tests/            pytest 测试，无需 LLM API Key
+提出操作 -> 用户明确 Confirm 或 Dismiss -> 保存决定
 ```
 
-修改业务规则前，请先阅读：
+`POST /api/actions/confirm` 会先验证该操作属于当前用户拥有的聊天轮次，再执行
+白名单内的业务操作，并把决定写入该轮 `response_json`。
+`POST /api/actions/decline` 会保存拒绝决定，但不会执行该业务操作。刷新页面时，
+前端会恢复已解决状态，不会再次要求用户处理同一个操作。
+
+当前白名单包括 `create_watch`、`cancel_watch`、`send_email`、
+`add_order_note` 和 `create_reminder`。邮件仍为模拟操作：系统只保存审计结果，
+不会通过 SMTP 向外发送邮件。
+
+## 工具
+
+| 类型 | 工具 | 用途 |
+|---|---|---|
+| Retrieval | `get_order_status` | 查询单个订单；描述对应多个订单时要求提供 ID |
+| Retrieval | `get_orders_at_risk` | 查询逾期、停滞和交期紧张的订单 |
+| Judgement | `check_feasibility` | 估算新订单是否符合可用产能 |
+| Tracing | `trace_order` | 返回来源字段、计算字段和风险依据 |
+| Discovery | `find_orders` | 应用经理给出的筛选条件 |
+| Discovery | `discover_factory_issues` | 按明确规则排序订单和生产问题 |
+| Briefing | `get_morning_briefing` | 返回结构化晨间运营事实 |
+| Action | `draft_chase_email` | 生成本地草稿，不发送邮件 |
+| Action | `send_email` | 提出并模拟执行已确认的邮件操作 |
+| Action | `add_order_note` | 确认后保存订单备注 |
+| Action | `create_reminder` | 确认后保存日历提醒记录 |
+| Action | `create_watch`、`list_watches`、`cancel_watch` | 管理本地评估的持续监控 |
+| Audit | `get_recent_actions` | 读取最近 Copilot 操作记录 |
+
+`production_log` 的粒度是整个工厂的 `date x stage`，不是订单级事件日志。
+
+## Standing Watches
+
+当前实现的监控条件是 `ORDER_INACTIVE_BY_DATE`。系统在调用
+`GET /api/watches?as_of=YYYY-MM-DD` 时评估监控规则；它不是后台定时任务，
+也不是实时推送系统。
+
+- 监控触发后会生成 `watch_events` 和审计记录。
+- 同一个监控不会重复触发。
+- 取消操作会保留记录并设置 `status=CANCELLED`，不会删除历史。
+- 当前使用 `LocalWatchNotifier`，没有邮件或 Push Notification。
+- Reminder 是保存的日历备注，不会像 Watch 一样自动评估条件。
+
+## 项目结构
 
 ```text
-docs/architecture.md
-docs/tool_spec.md
+backend/               FastAPI、LangGraph、工具和运行时服务
+frontend/              React、Vite 和 Tailwind 管理端
+data/                  来源数据、示例和语义定义
+docs/                  架构和工具契约
+evaluation/            开发问题集与评测材料
+postgresql_database/   数据库生命周期、迁移、种子数据和数据库测试
+SQL_related_app/       独立的数据管理中台
+tests/                 后端与 API 测试
 ```
 
-`tool_spec.md` 记录了各工具的行为和限制。
+`SQL_related_app` 仍是独立的数据管理组件。它可以更新共享工厂数据，但不负责
+Manager 历史对话。
 
-课程最终 Evaluation Report 仍要求整理一张统一的工具表，至少包含：
+## 运行环境
 
-| Name | Input | Output | Purpose | Non-goals | Failure Mode |
-| ---- | ----- | ------ | ------- | --------- | ------------ |
-| 工具名称 | 输入    | 输出     | 用途      | 不负责什么     | 失败情况         |
+- 建议使用 Python 3.12 创建项目虚拟环境。
+- Node.js 18 或更高版本。
+- 本地 PostgreSQL 服务和 `psql`。
+- 只有运行 LLM Chat 时才需要 Gemini 或 OpenAI-compatible API Key。
 
----
+不调用 LLM 的测试不需要 LLM Key；PostgreSQL 集成测试需要已经配置好的本地
+测试数据库。
 
-# Prerequisites｜运行环境
+## 本地安装
 
-* Python 3.10+
-* Node.js 18+
-* OpenAI-compatible API Key
-
-> API Key **仅在使用 Chat Agent 时需要**。
->
-> `pytest` 测试和数据加载功能无需 API Key。
-
----
-
-# Backend｜后端
-
-在项目根目录使用 PowerShell：
+### 1. 创建 Python 环境
 
 ```powershell
-python -m venv .venv
-
-.\.venv\Scripts\Activate.ps1
-
-pip install -r requirements.txt
-
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 copy .env.example .env
-
-# 编辑 .env，设置 OPENAI_API_KEY
-# 可选配置：OPENAI_BASE_URL、LLM_MODEL
-
-uvicorn backend.main:app --reload --port 8000
 ```
 
-健康检查：
+在本地 `.env` 中填写数据库密码、至少 32 个字符的 `AUTH_SECRET_KEY`，以及
+所选 LLM Provider 的 Key。不要提交 `.env`。
 
-```text
-http://127.0.0.1:8000/api/health
-```
+### 2. 准备 PostgreSQL
 
----
-
-# Frontend｜前端
+角色、数据库、迁移、种子导入、验证和权限测试的完整命令参见
+[postgresql_database/README.md](postgresql_database/README.md)。核心结构步骤是：
 
 ```powershell
-cd frontend
-
-npm install
-
-npm run dev
+.\.venv\Scripts\python.exe -m alembic -c postgresql_database\alembic.ini upgrade head
+.\.venv\Scripts\python.exe postgresql_database\bootstrap\setup_checkpoints.py
 ```
 
-打开：
+Alembic 和 checkpoint 初始化是明确的数据库管理步骤。FastAPI 启动时不会自动
+建表或执行数据库迁移。
 
-```text
-http://localhost:5173
-```
-
-Vite 会将 `/api` 请求代理至后端 `8000` 端口。
-
----
-
-# Tests｜测试
+### 3. 启动后端
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-
-pytest
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --port 8000
 ```
 
-测试包括：
+健康检查：[http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health)
 
-* Schema
-* 日期计算
-* 风险标记
-* Agent Routing
-* Tool JSON
+### 4. 启动前端
 
-测试**不会调用 LLM**。
-
----
-
----
-
-# Architecture Principle｜核心职责划分
-
-项目明确区分 **Python Tools** 和 **LLM Agent** 的职责。
-
-### Tools / Python
-
-所有确定性的业务计算都由 Python 完成，包括：
-
-* 订单状态
-* 风险标记
-* 日期计算
-* 产能估算
-* Morning Briefing
-* 其他业务数字
-
-### LLM
-
-LLM 主要负责：
-
-* 判断问题是否属于系统支持范围
-* 选择合适的业务工具
-* 根据工具返回结果组织和解释最终答案
-
-### Unsupported Questions
-
-对于系统不支持的问题：
-
-> **不得调用无关工具。**
-
-例如：
-
-> “What is the revenue from TrendCart?”
-
-由于当前数据没有价格 / 收入信息，Agent 应直接说明系统无法回答，而不是调用其他工具进行推测。
-
-### Actions
-
-所有具有副作用的操作遵循：
-
-**Proposal → Confirmation → Persistence**
-
-即：
-
-1. Agent 首先提出操作方案
-2. 用户在界面点击 Confirm（或聊天回复 yes）
-3. 系统才在本地持久化
-
-目前邮件功能**不会实际发送邮件**。
-
----
-
-# Try These Questions｜示例问题
-
-配置 API Key 后，可以尝试：
-
-```text
-How is ORD-120 doing?
+```powershell
+npm --prefix frontend install
+npm --prefix frontend run dev
 ```
 
-查询 ORD-120 当前状态。
+访问 [http://localhost:5173](http://localhost:5173)，Vite 会把 `/api` 代理到
+后端 8000 端口。
 
-```text
-How is the TrendCart order doing?
+## 验证
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest postgresql_database\tests -q
+npm --prefix frontend run build
+git diff --check
 ```
 
-如果存在多个 TrendCart 订单，Agent 应要求用户进一步指定具体订单。
+数据校验与数据库权限测试命令参见数据库 README。
 
-```text
-Which orders are at risk?
-```
+## 当前限制
 
-查询当前存在风险的订单。
+- Morning Briefing 和 Standing Watches 没有后台调度器。
+- 邮件、日历和 Push 集成都只是本地模拟。
+- `assess_stage_performance` 尚未成为独立工具；Discovery 和 Briefing 只使用
+  已记录的产量基线启发式规则。
+- `evaluation/questions.json` 是开发阶段/few-shot 表述模板库，不是独立
+  Held-out 准确率测试集。
+- 当前一轮 Assistant 消息只按一个决定处理整个 proposed-action 列表，尚不支持
+  同一轮多个操作分别 Confirm/Dismiss。
 
-```text
-Why is ORD-120 considered risky?
-```
+## 协作规则
 
-解释 ORD-120 为什么被判断为风险订单。
+1. 不得编造存储数据和 `data/semantic_layer.yaml` 中不存在的字段或业务事实。
+2. 数字计算与业务规则必须写在确定性的 Python 服务中，不能隐藏在 Prompt 里。
+3. 任何有副作用的操作都必须先获得用户明确确认。
+4. 不得声称系统已经发送外部邮件或通知。
+5. 数据库结构变更必须通过经过审核的 Alembic migration；正常启动应用时不得建表。
 
-```text
-Can we take 800 hoodies by August 25?
-```
-
-检查新增 800 件 Hoodie 订单的生产可行性。
-
-```text
-Give me this morning's briefing
-```
-
-生成当天的生产运营简报。
-
-```text
-List the TrendCart orders
-```
-
-列出所有 TrendCart 相关订单。
-
-```text
-Draft a chase-up email for ORD-120
-```
-
-生成 ORD-120 的催单邮件草稿。
-
-```text
-Create a reminder to check ORD-005 tomorrow
-```
-
-创建本地 Reminder Proposal；不会向外部系统发送通知。
-
-```text
-What is the revenue from TrendCart?
-```
-
-应该拒绝回答，因为当前数据没有价格 / 收入数据。
-
----
-
-# Next｜下一阶段开发计划
-
-为了优先满足 Track 1 的核心要求，建议按照以下顺序继续开发：
-
-### 1. Standing Watches
-
-基于工厂日历进行到期检查，并将触发结果写入 UI / Audit。
-
-> 暂时仍不需要真实 Push Notification。
-
-### 2. Stage Performance
-
-完整的 `assess_stage_performance` 仍未实现。Discovery V1 只复用 briefing 的 0.70 × 中位数启发式。
-
-### 3. Scheduled Briefing
-
-实现真正的：
-
-> Scheduled Briefing
-
-或者至少支持：
-
-> 打开应用 → 自动展示今天的 Briefing
-
-而不只是侧边栏中的结构化 JSON。
-
-### 4. Held-out Evaluation
-
-添加独立 Held-out Evaluation 数据集，并为 `Evaluation.pdf` 准备失败案例分析。
-
----
-
-# Rules for Teammates｜协作开发规则
-
-### 1. 不得编造数据字段或业务事实
-
-只能使用：
-
-```text
-data/
-data/data_dictionary.md
-```
-
-中明确存在的数据和业务定义。
-
-### 2. 不要把业务计算写进 Prompt
-
-例如：
-
-* 总数量
-* 天数
-* 剩余天数
-* 产能
-* 风险计算
-
-等业务逻辑都必须由 **Python Function** 完成。
-
-不要把计算公式写死在 Prompt 中。
-
-### 3. 不确定的设计不要猜
-
-如果现有数据无法支持某项设计：
-
-```python
-# TODO
-```
-
-而不是自行假设业务规则。
-
-### 4. 副作用操作必须经过明确确认
-
-任何具有副作用的操作：
-
-* 必须经过用户明确确认
-* 不得在确认之前执行
-* 不得声称已经发送外部邮件
-
----
-
-# Logging｜日志
-
-API 日志输出至：
-
-```text
-console
-logs/app.log
-```
-
-查询、工具调用以及 Action Trace 写入：
-
-```text
-data/copilot_state.db
-```
-
-该数据库已加入 `.gitignore`。
-
-它独立于 `factory.db`，因此即使重新加载 CSV 数据，也会保留 Co-Pilot 的操作与审计记录。
+修改系统行为前请阅读 [docs/architecture.md](docs/architecture.md) 和
+[docs/tool_spec.md](docs/tool_spec.md)。
