@@ -38,9 +38,12 @@ from backend.routers.data_admin import (
 )
 from backend.routers.conversations import router as conversations_router
 from backend.services.conversation_history import (
+    ActionDecisionError,
     ConversationNotFoundError,
     get_owned_conversation,
+    record_turn_action_decision,
     save_turn,
+    validate_turn_action,
 )
 from backend.services.watches import evaluate_and_list
 from backend.tools.registry import MVP_TOOLS
@@ -129,13 +132,21 @@ def chat(request: ChatRequest, user: CurrentUser = Depends(get_current_user),) -
             result = run_agent(request.message, public_conversation_id, thread_id=thread_id,)
             response_json = {key: value for key, value in result.items() if key not in ("answer", "conversation_id")}
 
-            save_turn(
+            saved_turn = save_turn(
                 user.id,
                 request.conversation_id,
                 question=request.message,
                 answer=result["answer"],
                 response_json=response_json,
             )
+
+            result["proposed_actions"] = [
+                {
+                    **action,
+                    "_turn_id": saved_turn["id"],
+                }
+                for action in result.get("proposed_actions") or []
+            ]
         finally:
             set_current_user(None)
 
@@ -205,29 +216,66 @@ def watches(as_of: str | None = None, user: CurrentUser = Depends(get_current_us
         set_current_user(None)
 
 
-@app.post("/api/actions/confirm", response_model=ConfirmActionResponse)
-def confirm_action(request: ConfirmActionRequest, user: CurrentUser = Depends(get_current_user)) -> ConfirmActionResponse:
-    """Persist a proposed action after a UI click. Does not call the LLM."""
-    get_db()
-    try:
-        result = confirm_proposed_action(request.action, current_user=user)
-    except ConfirmError as exc:
-        raise HTTPException(status_code=400, detail=exc.message) from exc
-    if not result.get("ok"):
-        err = result.get("error") or {}
+def _action_turn_id(action: dict) -> int:
+    turn_id = action.get("_turn_id")
+
+    if (
+        isinstance(turn_id, bool)
+        or not isinstance(turn_id, int)
+        or turn_id < 1
+    ):
         raise HTTPException(
             status_code=400,
-            detail=err.get("message") or "Confirmation failed.",
+            detail=(
+                "The proposed action is missing its persisted "
+                "chat turn."
+            ),
         )
+
+    return turn_id
+
+
+@app.post("/api/actions/confirm", response_model=ConfirmActionResponse)
+def confirm_action(request: ConfirmActionRequest, user: CurrentUser = Depends(get_current_user)) -> ConfirmActionResponse:
+    """Execute and persist a manager-confirmed proposed action."""
+    get_db()
+    turn_id = _action_turn_id(request.action)
+
+    try:
+        validate_turn_action(user.id, turn_id, action=request.action)
+        result = confirm_proposed_action(request.action, current_user=user)
+        if not result.get("ok"):
+            err = result.get("error") or {}
+            raise HTTPException(
+                status_code=400,
+                detail=err.get("message") or "Confirmation failed.",
+            )
+        record_turn_action_decision(user.id, turn_id, action=request.action, status="confirmed", summary=result.get("summary") or "Action confirmed.",)
+
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Chat turn not found",) from exc
+    except ActionDecisionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ConfirmError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+
     return ConfirmActionResponse(**result)
 
 
 @app.post("/api/actions/decline", response_model=ConfirmActionResponse)
 def decline_action(request: ConfirmActionRequest, user: CurrentUser = Depends(get_current_user)) -> ConfirmActionResponse:
-    """Record that the manager dismissed a proposal. Nothing is persisted."""
+    """Persist that the manager dismissed a proposed action."""
     get_db()
+    turn_id = _action_turn_id(request.action)
+    summary = "Dismissed. The proposed action was not executed."
     try:
+        validate_turn_action(user.id, turn_id, action=request.action)
         result = decline_proposed_action(request.action, current_user=user)
+        record_turn_action_decision(user.id, turn_id, action=request.action, status="dismissed", summary=summary,)
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Chat turn not found",) from exc
+    except ActionDecisionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc),) from exc
     except ConfirmError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
-    return ConfirmActionResponse(ok=True, type=result.get("type"), declined=True, summary="Dismissed. Nothing was saved.")
+    return ConfirmActionResponse(ok=True, type=result.get("type"), declined=True, summary=summary)

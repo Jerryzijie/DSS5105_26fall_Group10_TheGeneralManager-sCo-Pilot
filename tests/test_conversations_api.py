@@ -212,6 +212,13 @@ def test_conversation_api_authentication_and_isolation(
             assert own_chat_without_llm.status_code == 503
 
             observed_call = {}
+            proposal = {
+                "type": "create_watch",
+                "order_id": "ORD-005",
+                "condition_type": "NO_MOVEMENT",
+                "check_date": "2026-04-02",
+                "message": "Tell me if ORD-005 has not moved.",
+            }
 
             def fake_run_agent(
                 message: str,
@@ -229,7 +236,7 @@ def test_conversation_api_authentication_and_isolation(
                     "conversation_id": public_id,
                     "tools_used": [],
                     "traces": [],
-                    "proposed_actions": [],
+                    "proposed_actions": [proposal],
                     "limitation": None,
                     "routing_intent": "PROCEED",
                 }
@@ -254,6 +261,8 @@ def test_conversation_api_authentication_and_isolation(
                 },
             )
             assert continued.status_code == 200, continued.text
+            continued_json = continued.json()
+            returned_action = continued_json["proposed_actions"][0]
             assert observed_call == {
                 "message": "Why?",
                 "public_id": str(conversation_id),
@@ -273,6 +282,32 @@ def test_conversation_api_authentication_and_isolation(
             assert (
                 continued_body["turns"][-1]["answer"]
                 == "It is still in production."
+            )
+
+            latest_turn = continued_body["turns"][-1]
+
+            assert returned_action == {
+                **proposal,
+                "_turn_id": latest_turn["id"],
+            }
+            assert (
+                latest_turn["response_json"]["proposed_actions"]
+                == [proposal]
+            )
+            assert (
+                "_turn_id"
+                not in latest_turn["response_json"]["proposed_actions"][0]
+            )
+
+            cross_user_confirm = client.post(
+                "/api/actions/confirm",
+                headers=second_headers,
+                json={"action": returned_action},
+            )
+            assert cross_user_confirm.status_code == 404
+            assert (
+                cross_user_confirm.json()["detail"]
+                == "Chat turn not found"
             )
     finally:
         if user_ids:

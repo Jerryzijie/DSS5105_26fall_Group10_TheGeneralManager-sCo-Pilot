@@ -55,7 +55,11 @@ function historyTurnsToMessages(turns) {
         toolsUsed: metadata.tools_used || [],
         traces: metadata.traces || [],
         limitation: metadata.limitation || null,
-        proposedActions: metadata.proposed_actions || [],
+        proposedActions: (metadata.proposed_actions || []).map((action) => ({
+          ...action,
+          _turn_id: turn.id,
+        })),
+        decision: metadata.decision || null,
         clarification: metadata.clarification || null,
         charts: metadata.charts || [],
         tables: metadata.tables || [],
