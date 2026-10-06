@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Sidebar from "../components/Sidebar.jsx";
 import ChatPanel from "../components/ChatPanel.jsx";
 import DataManagement from "./DataManagement.jsx";
@@ -7,9 +7,61 @@ import { useAuth } from "../auth/AuthContext.jsx";
 import { fetchHealth } from "../services/api.js";
 import { deactivateMe } from "../services/authApi.js";
 import { friendlyAuthError } from "../services/authErrors.js";
+import ConversationList from "../components/ConversationList.jsx";
+import {
+  createConversation,
+  fetchConversationHistory,
+  listConversations,
+} from "../services/conversationsApi.js";
 
-function newConversationId() {
-  return `gm-${Date.now()}`;
+
+function lastConversationKey(userId) {
+  return `sweaterco:last-conversation:${userId}`;
+}
+
+function readLastConversationId(userId) {
+  try {
+    return localStorage.getItem(lastConversationKey(userId));
+  } catch {
+    return null;
+  }
+}
+
+function rememberConversationId(userId, conversationId) {
+  try {
+    localStorage.setItem(
+      lastConversationKey(userId),
+      conversationId,
+    );
+  } catch {
+    // Storage may be unavailable in private browsing mode.
+  }
+}
+
+function historyTurnsToMessages(turns) {
+  return turns.flatMap((turn) => {
+    const metadata = turn.response_json || {};
+
+    return [
+      {
+        role: "user",
+        content: turn.question,
+        persistedTurnId: turn.id,
+      },
+      {
+        role: "assistant",
+        content: turn.answer,
+        persistedTurnId: turn.id,
+        toolsUsed: metadata.tools_used || [],
+        traces: metadata.traces || [],
+        limitation: metadata.limitation || null,
+        proposedActions: metadata.proposed_actions || [],
+        clarification: metadata.clarification || null,
+        charts: metadata.charts || [],
+        tables: metadata.tables || [],
+      },
+    ];
+  });
 }
 
 export default function Home() {
@@ -21,7 +73,15 @@ export default function Home() {
   const [confirmDeactivate, setConfirmDeactivate] = useState(false);
   const [deactivateBusy, setDeactivateBusy] = useState(false);
   const [deactivateError, setDeactivateError] = useState("");
-  const conversationId = useMemo(newConversationId, []);
+  const [conversations, setConversations] = useState([]);
+  const [conversationId, setConversationId] = useState(null);
+  const [conversationLoading, setConversationLoading] = useState(true);
+  const [conversationCreateBusy, setConversationCreateBusy] = useState(false);
+  const [conversationError, setConversationError] = useState("");
+  const [historyMessages, setHistoryMessages] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyConversationId, setHistoryConversationId] = useState(null);
+  const [chatBusy, setChatBusy] = useState(false);
 
   const isAdmin = user?.role === "ADMIN";
 
@@ -37,6 +97,158 @@ export default function Home() {
       setActiveView("copilot");
     }
   }, [isAdmin, activeView]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const userId = user?.id;
+
+    setConversations([]);
+    setConversationId(null);
+    setConversationError("");
+
+    if (!userId) {
+      setConversationLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function initialiseConversations() {
+      setConversationLoading(true);
+
+      try {
+        let items = await listConversations();
+
+        if (cancelled) return;
+
+        let selectedId = readLastConversationId(userId);
+
+        if (!items.some((item) => item.id === selectedId)) {
+          selectedId = items[0]?.id ?? null;
+        }
+
+        if (!selectedId) {
+          const created = await createConversation();
+
+          if (cancelled) return;
+
+          items = [created];
+          selectedId = created.id;
+        }
+
+        setConversations(items);
+        setConversationId(selectedId);
+        rememberConversationId(userId, selectedId);
+      } catch (err) {
+        if (!cancelled) {
+          setConversationError(err.message);
+        }
+      } finally {
+        if (!cancelled) {
+          setConversationLoading(false);
+        }
+      }
+    }
+
+    initialiseConversations();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
+  async function refreshConversationList() {
+    try {
+      const items = await listConversations();
+      setConversations(items);
+    } catch (err) {
+      setConversationError(err.message);
+    }
+  }
+
+  function handleSelectConversation(selectedId) {
+    if (chatBusy) return;
+
+    setConversationId(selectedId);
+    setConversationError("");
+
+    if (user?.id) {
+      rememberConversationId(user.id, selectedId);
+    }
+  }
+
+  async function handleCreateConversation() {
+    if (conversationCreateBusy || chatBusy) return;
+
+    setConversationCreateBusy(true);
+    setConversationError("");
+
+    try {
+      const created = await createConversation();
+
+      setConversations((current) => [
+        created,
+        ...current.filter((item) => item.id !== created.id),
+      ]);
+
+      setConversationId(created.id);
+
+      if (user?.id) {
+        rememberConversationId(user.id, created.id);
+      }
+    } catch (err) {
+      setConversationError(err.message);
+    } finally {
+      setConversationCreateBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setHistoryMessages([]);
+    setHistoryConversationId(null);
+
+    if (!user?.id || !conversationId) {
+      setHistoryLoading(false);
+
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function loadHistory() {
+      setHistoryLoading(true);
+      setConversationError("");
+
+      try {
+        const history = await fetchConversationHistory(
+          conversationId,
+        );
+
+        if (!cancelled) {
+          setHistoryMessages(
+            historyTurnsToMessages(history.turns || []),
+          );
+          setHistoryConversationId(conversationId);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setConversationError(err.message);
+        }
+      } finally {
+        if (!cancelled) {
+          setHistoryLoading(false);
+        }
+      }
+    }
+
+    loadHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, conversationId]);
 
   async function handleDeactivate() {
     setDeactivateBusy(true);
@@ -120,7 +332,22 @@ export default function Home() {
               </div>
             )}
           </nav>
-          {activeView === "copilot" && <Sidebar refreshToken={boardTick} />}
+          {activeView === "copilot" && (
+            <>
+              <ConversationList
+                conversations={conversations}
+                activeConversationId={conversationId}
+                loading={conversationLoading}
+                createBusy={conversationCreateBusy}
+                interactionDisabled={chatBusy}
+                error={conversationError}
+                onSelect={handleSelectConversation}
+                onCreate={handleCreateConversation}
+              />
+
+              <Sidebar refreshToken={boardTick} />
+            </>
+          )}
           <div className="rounded-lg border border-ink/10 bg-white p-3 shadow-sm">
             <p className="text-xs font-medium text-ink/70">Account</p>
             {confirmDeactivate ? (
@@ -160,22 +387,30 @@ export default function Home() {
           </div>
         </div>
         {activeView === "copilot" ? (
-          <ChatPanel
-            conversationId={conversationId}
-            llmReady={Boolean(health?.llm_configured)}
-            onBoardChanged={() => setBoardTick((n) => n + 1)}
-          />
+          conversationId && historyConversationId === conversationId ? (
+            <ChatPanel
+              key={conversationId}
+              conversationId={conversationId}
+              initialMessages={historyMessages}
+              llmReady={Boolean(health?.llm_configured)}
+              onBoardChanged={() => setBoardTick((n) => n + 1)}
+              onBusyChange={setChatBusy}
+              onConversationUpdated={refreshConversationList}
+            />
+          ) : (
+            <section className="flex min-h-[70vh] items-center justify-center rounded-lg border border-ink/10 bg-white shadow-sm">
+              <p className="text-xs text-ink/45">
+                {conversationLoading || historyLoading
+                  ? "Loading conversations…"
+                  : conversationError || "No conversation selected."}
+              </p>
+            </section>
+          )
         ) : activeView === "data" && isAdmin ? (
           <DataManagement />
         ) : activeView === "users" && isAdmin ? (
           <UserManagement />
-        ) : (
-          <ChatPanel
-            conversationId={conversationId}
-            llmReady={Boolean(health?.llm_configured)}
-            onBoardChanged={() => setBoardTick((n) => n + 1)}
-          />
-        )}
+        ) : null}
       </main>
     </div>
   );
