@@ -13,7 +13,7 @@
       "relevant_tool": "get_orders_at_risk",
       "tool_args": {},
       "current_issue": "把overdue,stalled,和tight_deadline都包含进来了，应该只要tight_deadline, 且tight_deadline没有考虑件数的影响\ndays_left = ∑_(left_stages)▒pieces/(30-day mean production ability of the phase)",
-      "expected_answer": "**3 orders are at risk of missing their due dates: ORD-029, ORD-108, and ORD-103.**\n\n🔴 **ORD-029 — Immediate Attention**\n1,500 Beanies | Northwind Apparel | **Due TODAY**\nStill has **Washing and Packing** remaining, making on-time completion unlikely. Should be prioritized immediately!\n\n🟠 **ORD-108 — High Risk**\n2,000 Scarf | Harbor Knits | **Due in 2 days**\nStill has **Assembly, Washing, and Packing** remaining. With 2,000 pieces exceeding the factory’s typical daily output at these stages, it is unlikely to finish on time without intervention.\n\n🟠 **ORD-103 — High Risk**\n2,000 Scarf | Bright Basics | **Due in 3 days**\nSimilarly, its **large quantity and remaining production workload** put the order at high risk of delay and require close attention.\n\n**Recommended Priority: ORD-029 → ORD-108 → ORD-103.**",
+      "expected_answer": "3 orders are at risk of missing their due dates: ORD-029, ORD-108, and ORD-103.\n\n🔴 ORD-029 — Immediate attention\n*1,500 Beanies | Northwind Apparel | **Due today***\nWashing and Packing remain. The estimated workload is 4.3 working days, but only 1 working day is available.\n\n🟠 ORD-108 — High risk\n*2,000 Scarves | Harbor Knits | **Due in 3 days***\nAssembly, Washing, and Packing remain. Estimated work is 8.4 working days, versus 3 working days available.\n\n🟠 ORD-103 — High risk\n*2,000 Scarves | Bright Basics | **Due in 4 days***\nIt also has Assembly, Washing, and Packing remaining, requiring an estimated 8.4 working days with only 4 working days available.\n\nRecommended priority: ORD-029 → ORD-108 → ORD-103.",
       "must_include": [
         "ORD-029",
         "ORD-108",
@@ -30,7 +30,7 @@
       "relevant_tool": "get_orders_at_risk",
       "tool_args": {},
       "current_issue": "没办法模拟之后的生产情况，但应该可以根据之前生产日志估计后续的生产情况，从而识别risk",
-      "expected_answer": "**3 orders are likely to miss their due dates in the next 7 days: ORD-108, ORD-103, and ORD-062.**\n\n🟠 **ORD-108 & ORD-103 — High Risk**\n2,000 Scarf | Harbor Knits | **Due in 2 days** & 2,000 Scarf | Bright Basics | **Due in 3 days**\nBoth are **2,000-piece Scarf orders** due soon (in three days), with **Assembly, Washing, and Packing** still remaining. Given the large quantity and current production pace, both are unlikely to finish on time.\n\n🟡 **ORD-062 — At Risk**\n2,000 Scarf | Bright Basics | **Due in 7 days**\nStill in **Knitting**, with all **4 stages** left. Completing 2,000 pieces through the full production process within 7 days will be challenging at the current pace.\n\n**ORD-103 and ORD-062 need particular attention:** both are 2,000-piece Scarf orders for **Bright Basics**, meaning 4,000 pieces for the same customer will be moving through almost the same production process, further increasing delivery risk.",
+      "expected_answer": "**3 orders are likely to miss their due dates in the next 7 days: ORD-108, ORD-103, and ORD-062.**\n\n🟠 **ORD-108 & ORD-103 — High Risk**\n2,000 Scarf | Harbor Knits | **Due in 3 days** & 2,000 Scarf | Bright Basics | **Due in 4 days**\nBoth are **2,000-piece Scarf orders** due soon (in three days), with **Assembly, Washing, and Packing** still remaining. Given the large quantity and current production pace, both are unlikely to finish on time.\n\n🟡 **ORD-062 — At Risk**\n2,000 Scarf | Bright Basics | **Due in 8 days**\nStill in **Knitting**, with all **4 stages** left. Completing 2,000 pieces through the full production process within 7 days will be challenging at the current pace.\n\n**ORD-103 and ORD-062 need particular attention:** both are 2,000-piece Scarf orders for **Bright Basics**, meaning 4,000 pieces for the same customer will be moving through almost the same production process, further increasing delivery risk.",
       "must_include": [
         "ORD-108",
         "ORD-103",
@@ -349,6 +349,31 @@
         "ASSEMBLY",
         "ORD-120"
       ]
+    },
+    {
+      "id": "Q017",
+      "question": "How should we resequence production to minimize orders delivered late over the next 7 days?",
+      "category": "normal_lookup",
+      "expected_behavior": "clarify",
+      "relevant_tool": "get_orders_at_risk",
+      "tool_args": {},
+      "clarification": {
+        "prompt": "Which of these did you mean?",
+        "options": [
+          "I'll identify the orders most likely to miss their due dates in the next seven days so production can be resequenced around them.",
+          "I'll provide today's production priorities in first-, second, and third-priority groups with estimated days remaining."
+        ]
+      },
+      "expected_answer": "**3 orders are likely to miss their due dates in the next 7 days: ORD-108, ORD-103, and ORD-062.**\n\n🟠 **ORD-108 & ORD-103 — High risk**\n*2,000 Scarves | Harbor Knits | **Due in 3 days***\n*2,000 Scarves | Bright Basics | **Due in 4 days***\nBoth are in **Assembly**, with **Washing** and **Packing** also remaining. Each needs an estimated **8.4 working days**, compared with only **3** and **4 working days** available.\n\n🟡 **ORD-062 — At risk**\n*2,000 Scarves | Bright Basics | **Due in 8 days***\nIt is still in **Knitting**, so all four production stages remain. Estimated work is **10.6 working days**, versus **7 working days** available.\n\n**Resequencing focus:** prioritize ORD-108, then ORD-103, while protecting capacity for ORD-062. Bright Basics has two 2,000-piece scarf orders moving through similar production stages, increasing pressure on the same workflow.",
+      "must_include": [
+        "ORD-108",
+        "ORD-103",
+        "ORD-062",
+        "8.4",
+        "10.6"
+      ],
+      "verification_method": "prose_template",
+      "notes": "After the first clarification option. Table is render_table, not part of the prose."
     }
   ]
 }

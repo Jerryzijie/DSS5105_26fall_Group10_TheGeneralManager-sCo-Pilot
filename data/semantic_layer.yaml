@@ -354,6 +354,8 @@ term_definition:
         Copy data.orders / likely_to_miss_due_dates: not overdue, due today
         through +3 calendar days, and days_left (max of pieces / 30-day stage median
         summed over remaining stages, and remaining stage count) exceeds working days until due.
+        "Due in x days" is calendar_days_until_due: today through the due date, inclusive (due today = 1).
+        Working days to due is working_days_until_due_inclusive: Mon–Sat in that same span. Both include today.
         Do not answer this from OVERDUE or STALLED.
         "Next 7 days" uses likely_to_miss_due_next_7_days on the same tool.
     hasnt_moved:
@@ -367,3 +369,9 @@ term_definition:
         Python maps Thursday from factory today 2026-04-01 (Wednesday) to
         2026-04-02. Do not treat as missing data. Do not answer whether the
         order has already stalled; last_activity_date is checked later.
+    same production stages:
+      description: >
+        meaning the the difeerent orders are at the same production stage currently. i.e. the two orders are both at the knitting stage can be called same production stages.
+        If two orders are currently at different stage, do not call this term.
+
+

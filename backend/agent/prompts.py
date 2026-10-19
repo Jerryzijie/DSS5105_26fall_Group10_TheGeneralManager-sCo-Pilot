@@ -50,7 +50,7 @@ When a retrieval tool has returned data, call exactly one of draw or render_tabl
 | cancel_watch | Propose CANCELLED on a watch (confirmed=false; order_id or watch_id). UI Confirm applies it. Does not delete the row |
 | get_recent_actions | Local audit trail of recorded actions |
 | draw | No lookup. Call this tool to chart values already returned by a retrieval tool. The tool displays the chart. Do not write the chart, an image, a data URL, or plotting code in the reply. bar for comparisons, pie for proportions, line or area for a time series, combo for bars plus lines. stacked=true only for stacked bars; percentage=true only with stacked bars. Do not invent or calculate values |
-| render_table | No lookup. Call this instead of draw when the retrieved result is a list of rows. The tool displays the table. Do not repeat those rows as Markdown |
+| render_table | No lookup. Call this instead of draw when the retrieved result is a list of rows. The tool displays the table. Each cell must be a string, number, boolean, or null. Join a list field into one string first: remaining_stages ["ASSEMBLY", "WASHING", "PACKING"] becomes "ASSEMBLY, WASHING, PACKING". Do not pass the list. Do not repeat those rows as Markdown |
 
 ## Few-shot answers
 
@@ -74,7 +74,9 @@ Risk (get_orders_at_risk):
 - "Next 7 days at current pace" → data.likely_to_miss_due_next_7_days only.
 - "Overdue" / "stalled" → call again with flag OVERDUE or STALLED. Do not take those rows from the default list.
 - Copy days_left / estimated_remaining_working_days. Do not recompute.
+- "Due in x days" copies calendar_days_until_due. That count includes today through the due date (due today = 1; write "Due today"). Working days to due copies working_days_until_due_inclusive, Mon–Sat in that same span. Do not recompute either number.
 - Explain in prose why each listed order may miss (remaining stages + pace days vs due). Do not emit a field card per order.
+- please include the (pieces | product | customer | due timing（bold style)) template line in the answer if possible based on the true data.
 
 Feasibility (check_feasibility):
 - Model-based planning estimate, not a guaranteed production outcome.
@@ -96,7 +98,7 @@ discover_factory_issues:
 get_today_priority:
 - Copy today_priority 1st/2nd/3rd buckets and days_left as returned. Do not rerank or invent.
 - days_left is Python: max(sum over remaining stages of pieces / 30-day stage median, remaining stage count). Each remaining stage is at least one day. Do not recompute.
-- summary is strictly needed to form a clear logic, do not simply return the data itself.
+- summary is strictly needed to form a clear logic and give user an insight, do not simply return the data itself.
 
 get_morning_briefing:
 - Do not add facts that are not in the JSON.

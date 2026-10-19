@@ -11,6 +11,7 @@ from backend.services.calculations import (
     is_working_day,
     remaining_stages,
     working_days_since_activity,
+    calendar_days_until_due,
     working_days_until_due,
 )
 
@@ -32,6 +33,12 @@ def test_working_days_until_due_overdue_is_zero():
 
 def test_working_days_until_due_today_is_one():
     assert working_days_until_due(FACTORY_TODAY, FACTORY_TODAY) == 1
+
+
+def test_calendar_days_until_due_includes_today():
+    assert calendar_days_until_due(FACTORY_TODAY, FACTORY_TODAY) == 1
+    assert calendar_days_until_due(date(2026, 4, 3), FACTORY_TODAY) == 3
+    assert calendar_days_until_due(date(2026, 3, 17), FACTORY_TODAY) == -15
 
 
 def test_stall_threshold_example():

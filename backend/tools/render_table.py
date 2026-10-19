@@ -35,7 +35,15 @@ class TableColumn(BaseModel):
 class RenderTableInput(BaseModel):
     title: str = Field(min_length=1, max_length=100)
     columns: list[TableColumn] = Field(min_length=1, max_length=12)
-    rows: list[dict[str, Any]] = Field(min_length=1, max_length=100)
+    rows: list[dict[str, Any]] = Field(
+        min_length=1,
+        max_length=100,
+        description=(
+            "One object per displayed row. Each cell must be a string, number, boolean, or null. "
+            "A tool field that is a list is not a cell. Join it into one string and pass that string. "
+            'remaining_stages ["ASSEMBLY", "WASHING", "PACKING"] is the cell "ASSEMBLY, WASHING, PACKING".'
+        ),
+    )
 
 
 @tool(args_schema=RenderTableInput)
@@ -49,6 +57,10 @@ def render_table(
     Calling this tool displays the table. Do not write those rows again in the reply.
     Use after retrieving the rows from another tool. Include only supplied values;
     do not invent, calculate, or aggregate table cells.
+    Every cell must be a string, number, boolean, or null. If a retrieved field is a
+    list, join the items into one string before passing the row. Do not pass the list.
+    remaining_stages ["ASSEMBLY", "WASHING", "PACKING"] becomes the cell
+    "ASSEMBLY, WASHING, PACKING".
     """
     tool_name = "render_table"
     keys = [column.key for column in columns]

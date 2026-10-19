@@ -18,11 +18,12 @@ from backend.services.calculations import (
 from backend.services.database import FactoryDB
 from backend.services.feasibility import stage_throughput_medians
 
-# Immediate "will miss due" window: due today through +3 calendar days.
-MISS_DUE_CALENDAR_HORIZON = 3
-# "Next 7 days" excludes due-today and barely-short orders (slack < 1 day).
-NEXT_WEEK_MIN_CALENDAR_DAYS = 1
-NEXT_WEEK_MAX_CALENDAR_DAYS = 7
+# calendar_days_until_due counts today through the due date.
+# Due today is 1. Today through +3 calendar days is 1..4.
+MISS_DUE_CALENDAR_HORIZON = 4
+# "Next 7 days" excludes due-today: tomorrow (2) through today+7 (8).
+NEXT_WEEK_MIN_CALENDAR_DAYS = 2
+NEXT_WEEK_MAX_CALENDAR_DAYS = 8
 PACE_SLACK_DAYS = 1.0
 # Overdue and already at PACKING, or < 1 remaining estimated day.
 NEAR_COMPLETE_DAYS = 1.0
@@ -126,7 +127,7 @@ def likely_to_miss_due_dates(db: FactoryDB) -> list[dict[str, Any]]:
 
 
 def likely_to_miss_due_next_n_days(db: FactoryDB) -> list[dict[str, Any]]:
-    """Due in 1–7 calendar days and at least one working day short at current pace."""
+    """Tomorrow through 7 calendar days ahead, at least one working day short."""
     medians = stage_medians(db)
     rows = []
     for order in db.in_progress_orders():
@@ -158,17 +159,17 @@ def today_priority(db: FactoryDB) -> dict[str, Any]:
         )
         if overdue and near:
             first.append(row)
-        elif (cal == 0) or (overdue and late_days >= URGENT_OVERDUE_MIN_LATE_DAYS and not near):
+        elif (cal == 1) or (overdue and late_days >= URGENT_OVERDUE_MIN_LATE_DAYS and not near):
             second.append(row)
         elif (
             not overdue
             and cal is not None
-            and 1 <= cal <= MISS_DUE_CALENDAR_HORIZON
+            and 2 <= cal <= MISS_DUE_CALENDAR_HORIZON
             and _is_pace_miss(row, min_slack=0.0)
         ):
             third.append(row)
     first.sort(key=lambda r: r["calendar_days_until_due"])  # more overdue first (more negative)
-    second.sort(key=lambda r: (0 if r["calendar_days_until_due"] == 0 else 1, r["calendar_days_until_due"]))
+    second.sort(key=lambda r: (0 if r["calendar_days_until_due"] == 1 else 1, r["calendar_days_until_due"]))
     third.sort(key=lambda r: r["calendar_days_until_due"])
     return {
         "1st_priority": [_priority_card(r) for r in first],
@@ -183,9 +184,8 @@ def today_priority(db: FactoryDB) -> dict[str, Any]:
             f"< {NEAR_COMPLETE_DAYS}). "
             "2nd: due today, or overdue by at least "
             f"{URGENT_OVERDUE_MIN_LATE_DAYS} calendar days and not close to done. "
-            "3rd: not overdue, due within "
-            f"{MISS_DUE_CALENDAR_HORIZON} calendar days, and estimated remaining "
-            "working days exceed working days until due."
+            "3rd: not overdue, due tomorrow through 3 calendar days ahead, and "
+            "estimated remaining working days exceed working days until due."
         ),
     }
 

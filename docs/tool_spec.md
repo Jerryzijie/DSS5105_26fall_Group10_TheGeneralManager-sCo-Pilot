@@ -27,7 +27,7 @@ Factory today = **2026-04-01**. Working day = Monday–Saturday.
 
 | Name | Formula |
 |---|---|
-| `calendar_days_until_due` | `due_date − 2026-04-01` (signed, calendar days) |
+| `calendar_days_until_due` | Calendar days from today through `due_date`, inclusive (due today = 1). If overdue, `due_date − 2026-04-01` (negative) |
 | `working_days_until_due_inclusive` | Count of Mon–Sat from today through `due_date`; `0` if overdue |
 | `working_days_since_last_activity` | Count of Mon–Sat after `last_activity_date` through today |
 | `remaining_stages` | From `current_stage` through PACKING; empty if COMPLETE |
@@ -49,7 +49,7 @@ With no `flag`, `data.orders` is the miss-due list. It is the same rows as `like
 | `OVERDUE` | `flag=OVERDUE`: `due_date < 2026-04-01`. Not included in the default list |
 | `STALLED` | `flag=STALLED`: working days since `last_activity_date` ≥ **3**. Not included in the default list |
 
-`likely_to_miss_due_next_7_days` is a separate list: due in 1–7 calendar days and at least one working day short on the same formula.
+`likely_to_miss_due_next_7_days` is a separate list: tomorrow through 7 calendar days ahead (not due today) and at least one working day short on the same formula.
 
 The stage-count check (`working days until due < remaining stage count`) is not the miss-due rule.
 

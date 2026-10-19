@@ -80,6 +80,18 @@ def calendar_days_between(start: date, end: date) -> int:
     return (end - start).days
 
 
+def calendar_days_until_due(due: date, today: date = FACTORY_TODAY) -> int:
+    """Calendar days for 'due in x days'.
+
+    Not overdue: count today through due_date, inclusive. Due today is 1.
+    Overdue: due_date - today, negative. Today is not counted in the lateness.
+    """
+    delta = (due - today).days
+    if delta < 0:
+        return delta
+    return delta + 1
+
+
 def working_days_until_due(due: date, today: date = FACTORY_TODAY) -> int:
     """Working days from today through due_date, inclusive. 0 if already overdue."""
     if due < today:
@@ -100,7 +112,7 @@ def order_computed_fields(order: dict[str, Any], today: date = FACTORY_TODAY) ->
     current_stage = order.get("current_stage") or ""
     stages_left = remaining_stages(current_stage)
 
-    calendar_until_due = calendar_days_between(today, due) if due else None
+    calendar_until_due = calendar_days_until_due(due, today) if due else None
     working_until_due = working_days_until_due(due, today) if due else None
     calendar_since_activity = (
         calendar_days_between(last_activity, today) if last_activity else None

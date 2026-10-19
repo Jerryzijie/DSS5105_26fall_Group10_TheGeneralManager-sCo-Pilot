@@ -173,8 +173,9 @@ def get_orders_at_risk(flag: Optional[str] = None) -> str:
       days_left = max(sum over remaining stages of pieces / 30-day median, remaining stage count).
       Included when days_left exceeds working days until due.
     flag=OVERDUE or flag=STALLED — that flag only. Not the miss-due list.
-    data.likely_to_miss_due_next_7_days — due in 1–7 calendar days and at least
-      one working day short at the same pace. Use for "next 7 days".
+    data.likely_to_miss_due_next_7_days — tomorrow through 7 calendar days ahead
+      (not due today) and at least one working day short at the same pace.
+      Use for "next 7 days".
     """
     tool_name = "get_orders_at_risk"
     try:
@@ -247,7 +248,7 @@ def get_orders_at_risk(flag: Optional[str] = None) -> str:
                         "order_ids": [r["order_id"] for r in miss_week],
                         "orders": miss_week,
                         "basis": (
-                            "Due in 1–7 calendar days (not due today). "
+                            "Tomorrow through 7 calendar days ahead (not due today). "
                             "Same pace formula. Requires at least 1 extra working day short."
                         ),
                     },
